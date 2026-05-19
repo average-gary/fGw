@@ -236,7 +236,7 @@ Each spec has: `Goal`, `Inputs` (deps), `Contract` (public surface — types, fi
   - `decode(hash: string): { lat: number; lon: number }`
   - `prefixesForRadiusMiles(lat: number, lon: number, miles: number): string[]` — returns geohash prefixes covering the circle.
   - `distanceMiles(a: string, b: string): number`
-- **Acceptance**: Unit tests: High View WV (`39.118, -78.660`) at precision 5 → `dnv*` family; `prefixesForRadiusMiles(..., 15)` includes the encoded value of a point 10 mi away and excludes a point 50 mi away.
+- **Acceptance**: Unit tests: High View WV (`39.118, -78.660`) at precision 5 → starts with `dqb` (verified `dqbnd`); `prefixesForRadiusMiles(..., 15)` includes the encoded value of a point ~7 mi away (lat shift +0.1°) and excludes a point ~69 mi away (lat shift +1°). Round-trip decode within ~76 m at precision 7. Distance from (39.118,-78.660) to (39.0,-78.0) ≈ 36 mi (haversine; allow 35–42).
 
 #### SPEC-004 — UI primitives & theme
 - **Goal**: Shared Tailwind components with an earthy, agrarian-but-modern aesthetic appropriate to the project. Avoid the generic AI-app look.

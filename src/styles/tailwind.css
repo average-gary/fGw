@@ -3,7 +3,48 @@
 @tailwind utilities;
 
 @layer base {
-  html, body, #root {
+  html,
+  body,
+  #root {
     height: 100%;
+  }
+  body {
+    /* Subtle paper-grain over the soil base. Static, no animation. */
+    background-image: theme('backgroundImage.grain');
+    background-repeat: repeat;
+    background-size: 160px 160px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: theme('fontFamily.serif');
+    font-feature-settings: 'ss01', 'ss02';
+  }
+  /* Visible-on-keyboard focus only. */
+  :focus {
+    outline: none;
+  }
+  :focus-visible {
+    outline: 2px solid theme('colors.moss.500');
+    outline-offset: 2px;
+  }
+}
+
+@layer utilities {
+  .eyebrow {
+    font-family: theme('fontFamily.mono');
+    font-size: theme('fontSize.eyebrow[0]');
+    line-height: theme('fontSize.eyebrow[1].lineHeight');
+    letter-spacing: theme('fontSize.eyebrow[1].letterSpacing');
+    text-transform: uppercase;
+    color: theme('colors.soil.500');
+  }
+  /* Hairline divider in soil tone — ubiquitous separator. */
+  .rule-soil {
+    border-color: theme('colors.soil.200');
   }
 }
