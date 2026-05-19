@@ -1,11 +1,17 @@
 import ComponentsRoute from './routes/_dev/Components';
+import { Onboarding } from './routes/Onboarding';
+import { useOnboarding } from './lib/onboarding';
+import { ToastProvider } from './components/ui/Toast';
 
-// TODO: replace with Feed when SPEC-018 lands.
+// TODO: replace ComponentsRoute with Feed when SPEC-018 lands.
 export function App() {
+  const completedAt = useOnboarding().completedAt;
   return (
-    <main className="mx-auto w-full max-w-screen-sm">
-      <ComponentsRoute />
-    </main>
+    <ToastProvider>
+      <main className="mx-auto w-full max-w-screen-sm">
+        {completedAt === null ? <Onboarding /> : <ComponentsRoute />}
+      </main>
+    </ToastProvider>
   );
 }
 
