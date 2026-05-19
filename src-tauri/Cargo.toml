@@ -1,0 +1,21 @@
+[package]
+name = "compost-marketplace"
+version = "0.0.1"
+description = "Powder Keg WV — FGW compost marketplace on Nostr"
+authors = ["Gary Krause"]
+edition = "2021"
+
+[lib]
+name = "compost_marketplace_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-notification = "2"
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+tauri-plugin-stronghold = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
