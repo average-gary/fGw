@@ -1,10 +1,13 @@
 // SPEC-035: barcode-scanner plugin is mobile-only.
 //
-// iOS additionally requires `NSCameraUsageDescription` in the generated
-// `gen/apple/<app>/Info.plist` (added by `pnpm tauri ios init`; not configurable
-// from this file). Android receives `<uses-permission android:name=
-// "android.permission.CAMERA"/>` automatically via the plugin's manifest merger
-// when `pnpm tauri android init` is run.
+// iOS: `NSCameraUsageDescription` is provided via
+// `src-tauri/Info.ios.plist`, which Tauri merges into the generated
+// `gen/apple/<app>_iOS/Info.plist` on each `pnpm tauri ios init` /
+// `tauri ios build`. Edit that source file, never the generated one
+// (`src-tauri/gen/` is .gitignored and regenerated).
+// Android: `<uses-permission android:name="android.permission.CAMERA"/>`
+// is auto-merged by the plugin's manifest at build time when
+// `pnpm tauri android init` has been run.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()

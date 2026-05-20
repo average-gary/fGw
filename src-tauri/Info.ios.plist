@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+		SPEC-035 — Camera permission usage string for the NIP-46 bunker QR
+		scanner (src/lib/auth/nip46.ts → @tauri-apps/plugin-barcode-scanner).
+		Tauri 2 merges this file into the generated Info.plist under
+		src-tauri/gen/apple/<app>_iOS/ on each `tauri ios init` / `tauri ios
+		build`. Edit here, never directly in gen/.
+	-->
+	<key>NSCameraUsageDescription</key>
+	<string>Compost Marketplace uses the camera to scan a Nostr bunker (NIP-46) sign-in QR code.</string>
+</dict>
+</plist>
