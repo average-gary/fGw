@@ -1,5 +1,6 @@
-// SPEC-009 tests: generate → reload → unlock → sign; wrong passphrase; reveal round-trip; key-exists.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+// SPEC-009 + SPEC-034 tests: generate → reload → unlock → sign; wrong passphrase;
+// reveal round-trip; key-exists; Stronghold (mocked) round-trip on native.
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import NDK, { NDKEvent, type NDKSigner } from '@nostr-dev-kit/ndk';
 import { verifyEvent } from 'nostr-tools/pure';
 import * as nip19 from 'nostr-tools/nip19';
@@ -112,5 +113,77 @@ describe('SPEC-009 nsecLocal', () => {
     }
     expect(caught).toBeInstanceOf(NsecLocalError);
     expect((caught as NsecLocalError).kind).toBe('no-key');
+  });
+});
+
+// SPEC-034: native (Stronghold) path. We mock isTauri()=true and stub
+// @tauri-apps/plugin-stronghold + @tauri-apps/api/path with an in-memory
+// fake. This proves the Stronghold branch wires up generate→reload→unlock
+// without ever touching IndexedDB.
+describe('SPEC-034 nsecLocal (mocked Stronghold path)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.doMock('@tauri-apps/api/core', () => ({ isTauri: () => true }));
+    vi.doMock('@tauri-apps/api/path', () => ({
+      appDataDir: async () => '/tmp/compost',
+      join: async (...parts: string[]) => parts.join('/'),
+    }));
+    const fakeStore = (() => {
+      const map = new Map<string, Uint8Array>();
+      return {
+        get: vi.fn(async (k: string) => map.get(k) ?? null),
+        insert: vi.fn(async (k: string, v: number[]) => {
+          map.set(k, new Uint8Array(v));
+        }),
+        remove: vi.fn(async (k: string) => {
+          const prev = map.get(k) ?? null;
+          map.delete(k);
+          return prev;
+        }),
+        _map: map,
+      };
+    })();
+    const fakeClient = { getStore: () => fakeStore };
+    const fakeStronghold = {
+      loadClient: vi.fn(async () => fakeClient),
+      createClient: vi.fn(async () => fakeClient),
+      save: vi.fn(async () => {}),
+      unload: vi.fn(async () => {}),
+    };
+    vi.doMock('@tauri-apps/plugin-stronghold', () => ({
+      Stronghold: { load: vi.fn(async () => fakeStronghold) },
+    }));
+  });
+  afterEach(() => {
+    vi.resetModules();
+    vi.doUnmock('@tauri-apps/api/core');
+    vi.doUnmock('@tauri-apps/api/path');
+    vi.doUnmock('@tauri-apps/plugin-stronghold');
+  });
+
+  it('generate → unlock round-trips through Stronghold', async () => {
+    const mod = await import('./nsecLocal');
+    await mod._clearForTests();
+
+    const { npub } = await mod.generateAndStore(PASS);
+    expect(npub.startsWith('npub1')).toBe(true);
+
+    const signer = await mod.unlock(PASS);
+    const user = await signer.user();
+    const decoded = nip19.decode(npub as nip19.NPub);
+    expect(decoded.type).toBe('npub');
+    expect(decoded.data).toBe(user.pubkey);
+
+    // Wrong passphrase still fails (AES-GCM auth tag check) even on native.
+    let caught: unknown;
+    try {
+      await mod.unlock('wrong');
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(mod.NsecLocalError);
+    expect((caught as InstanceType<typeof mod.NsecLocalError>).kind).toBe(
+      'wrong-passphrase',
+    );
   });
 });

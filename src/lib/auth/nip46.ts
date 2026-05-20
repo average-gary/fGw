@@ -24,6 +24,7 @@ import NDK, {
   NDKPrivateKeySigner,
   type NDKSigner,
 } from '@nostr-dev-kit/ndk';
+import { isTauri } from '@tauri-apps/api/core';
 
 export type Nip46ErrorKind =
   | 'invalid-uri'
@@ -127,16 +128,44 @@ export async function connectBunker(uri: string): Promise<NDKSigner> {
 }
 
 /**
- * Web-only QR scan path. Native app uses a Tauri camera plugin in SPEC-024.
+ * SPEC-035: Tauri 2's barcode-scanner plugin is mobile-only (iOS/Android).
+ * Detect the mobile webview via UA — `@tauri-apps/api/core` only exposes
+ * `isTauri()`, and `platform()` lives in `@tauri-apps/plugin-os`, which we
+ * intentionally don't pull in just for this check. iOS WKWebView and Android
+ * WebView both stamp the userAgent, so a UA test is sufficient to gate the
+ * dynamic plugin import (which would otherwise crash on desktop where the
+ * Rust crate isn't compiled in).
+ */
+function isTauriMobile(): boolean {
+  if (!isTauri()) return false;
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  return /Android|iPhone|iPad|iPod/i.test(ua);
+}
+
+/**
+ * QR scan path for connecting to a remote NIP-46 signer.
  *
- * Minimal happy path: open the user's camera via getUserMedia, scan with
- * `BarcodeDetector`, capture the first valid `bunker://` URI, delegate to
- * connectBunker.
- *
- * TODO: refine SPEC-024 mobile camera plugin — replace getUserMedia path with
- * the Tauri plugin and fall back to BarcodeDetector when running on web.
+ * - Native (iOS/Android via Tauri): uses `@tauri-apps/plugin-barcode-scanner`.
+ *   The plugin's `scan()` (verified in
+ *   node_modules/@tauri-apps/plugin-barcode-scanner/dist-js/index.d.ts:49)
+ *   resolves to `{ content, format, bounds }`.
+ * - Web: opens `getUserMedia` and polls `BarcodeDetector` (Chromium today;
+ *   throws `qr-not-supported` on Safari/Firefox without the polyfill).
  */
 export async function connectViaQR(): Promise<NDKSigner> {
+  if (isTauriMobile()) {
+    const { scan, Format } = await import(
+      '@tauri-apps/plugin-barcode-scanner'
+    );
+    const result = await scan({ windowed: false, formats: [Format.QRCode] });
+    const uri = result.content;
+    if (!uri.startsWith('bunker://')) {
+      throw new Nip46Error('invalid-uri', 'Scanned QR is not a bunker URI');
+    }
+    return connectBunker(uri);
+  }
+
   const BD = (globalThis as { BarcodeDetector?: unknown }).BarcodeDetector as
     | (new (opts: { formats: string[] }) => {
         detect: (

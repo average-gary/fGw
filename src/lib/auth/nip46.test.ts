@@ -8,8 +8,19 @@ const mocks = vi.hoisted(() => {
     nip46Ctor: vi.fn(),
     pkSignerCtor: vi.fn(),
     pkSignerGenerate: vi.fn(),
+    isTauri: vi.fn().mockReturnValue(false),
+    scan: vi.fn(),
   };
 });
+
+vi.mock('@tauri-apps/api/core', () => ({
+  isTauri: () => mocks.isTauri(),
+}));
+
+vi.mock('@tauri-apps/plugin-barcode-scanner', () => ({
+  scan: (opts: unknown) => mocks.scan(opts),
+  Format: { QRCode: 'QR_CODE' },
+}));
 
 vi.mock('@nostr-dev-kit/ndk', () => {
   class NDK {
@@ -134,9 +145,18 @@ describe('connectBunker', () => {
 
 describe('connectViaQR', () => {
   let originalBD: unknown;
+  let originalUA: PropertyDescriptor | undefined;
   beforeEach(() => {
     originalBD = (globalThis as { BarcodeDetector?: unknown }).BarcodeDetector;
     delete (globalThis as { BarcodeDetector?: unknown }).BarcodeDetector;
+    originalUA = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(navigator) as object,
+      'userAgent',
+    );
+    mocks.isTauri.mockReset().mockReturnValue(false);
+    mocks.scan.mockReset();
+    mocks.ndkConnect.mockReset().mockResolvedValue(undefined);
+    mocks.blockUntilReady.mockReset().mockResolvedValue({ pubkey: 'p' });
   });
   afterEach(() => {
     if (originalBD === undefined) {
@@ -145,11 +165,53 @@ describe('connectViaQR', () => {
       (globalThis as { BarcodeDetector?: unknown }).BarcodeDetector =
         originalBD;
     }
+    if (originalUA) {
+      Object.defineProperty(
+        Object.getPrototypeOf(navigator) as object,
+        'userAgent',
+        originalUA,
+      );
+    }
   });
 
   it('rejects with qr-not-supported when BarcodeDetector is undefined', async () => {
     await expect(connectViaQR()).rejects.toMatchObject({
       kind: 'qr-not-supported',
     });
+  });
+
+  it('takes the native Tauri path on iOS/Android without touching getUserMedia', async () => {
+    installLocalStorageShim();
+    mocks.isTauri.mockReturnValue(true);
+    Object.defineProperty(navigator, 'userAgent', {
+      value:
+        'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+      configurable: true,
+    });
+    mocks.scan.mockResolvedValue({
+      content: 'bunker://abc?relay=wss://r.example',
+      format: 'QR_CODE',
+      bounds: null,
+    });
+    // getUserMedia must NOT be called on native — fail loudly if it is.
+    const gum = vi.fn(() => {
+      throw new Error('getUserMedia called on native path');
+    });
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia: gum },
+      configurable: true,
+    });
+
+    const signer = await connectViaQR();
+    expect(signer).toBeDefined();
+    expect(mocks.scan).toHaveBeenCalledTimes(1);
+    expect(mocks.scan).toHaveBeenCalledWith({
+      windowed: false,
+      formats: ['QR_CODE'],
+    });
+    expect(gum).not.toHaveBeenCalled();
+    // connectBunker was reached (NDK connect + signer constructed).
+    expect(mocks.ndkConnect).toHaveBeenCalledTimes(1);
+    expect(mocks.nip46Ctor).toHaveBeenCalled();
   });
 });
