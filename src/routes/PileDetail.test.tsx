@@ -1,11 +1,20 @@
 /**
- * SPEC-021 — PileDetail tests.
+ * SPEC-021 / SPEC-031 — PileDetail tests.
  *
  * Pushes a synthetic kind-30078 pile event into an in-memory mock relay.
- * Asserts: layer checklist sized to `layersForHeight(height).max` for a
- * 2×2×2 pile (8–9 rows), and that "Advance" walks DRAFT → COLLECTING.
+ * Asserts:
+ *   - layer checklist sized to `layersForHeight(height).max` for a
+ *     2×2×2 pile (8–9 rows),
+ *   - "Advance" walks DRAFT → COLLECTING and republishes a fresh
+ *     kind-30078 with the new state and same `d`-tag (SPEC-031),
+ *   - toggling layer 1 republishes a kind-30078 whose decoded content
+ *     has `layers[0].completed === true` (SPEC-031),
+ *   - an incoming kind-30078 with a newer `created_at` overwrites the
+ *     locally rendered state — last-writer-wins cross-device sync
+ *     (SPEC-031).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { generateSecretKey, getPublicKey } from 'nostr-tools/pure';
 
 const memStore = vi.hoisted(() => {
   class MemoryStorage {
@@ -114,15 +123,34 @@ vi.mock('@/lib/blossom', () => ({
   })),
 }));
 
+// Pyramid: SPEC-031 wraps every PileDetail publish with `usePublishGuard`.
+// Stub it to a pass-through so the publish actually reaches the mock relay.
+vi.mock('@/lib/pyramid', () => ({
+  useMembershipStatus: (_pk: string) => 'allowed',
+  usePublishGuard: () => ({
+    blocked: false,
+    guard: async <T,>(fn: () => Promise<T>): Promise<T | null> => fn(),
+  }),
+}));
+
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { encodePile, PILE_EVENT_KIND } from '@/lib/pile/events';
+import { NDKPrivateKeySigner } from '@nostr-dev-kit/ndk';
+import { encodePile, parsePile, PILE_EVENT_KIND } from '@/lib/pile/events';
 import type { Pile } from '@/lib/pile/types';
+import { useAuthStore } from '@/lib/auth';
 import { PileDetail } from './PileDetail';
 
 const builderPk = 'a'.repeat(64);
 
-function publishDraftPile(d: string): Pile {
+function bytesToHex(bytes: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++)
+    s += (bytes[i] ?? 0).toString(16).padStart(2, '0');
+  return s;
+}
+
+function publishDraftPile(d: string, overrides: Partial<Pile> = {}): Pile {
   const pile: Pile = {
     d,
     name: 'Detail test pile',
@@ -136,10 +164,11 @@ function publishDraftPile(d: string): Pile {
     state: 'DRAFT',
     photos: [],
     version: 1,
+    ...overrides,
   };
   const enc = encodePile(pile);
   void mockState.publish({
-    id: 'pile-id',
+    id: `pile-id-${d}`,
     kind: enc.kind,
     content: enc.content,
     tags: enc.tags,
@@ -152,6 +181,18 @@ function publishDraftPile(d: string): Pile {
 beforeEach(() => {
   memStore.clear();
   resetRelay();
+  // SPEC-031 mutations call `republishPile`, which requires a signer in
+  // the auth store. Plant a fresh local signer for every test.
+  const sk = generateSecretKey();
+  const _pk = getPublicKey(sk);
+  const signer = new NDKPrivateKeySigner(bytesToHex(sk));
+  useAuthStore.setState({
+    method: 'nsec-local',
+    signer,
+    npub: _pk,
+    status: 'ready',
+    error: undefined,
+  });
 });
 
 afterEach(() => {
@@ -196,6 +237,156 @@ describe('SPEC-021 PileDetail', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Collecting')).toBeTruthy();
+    });
+  });
+
+  it('republishes a kind-30078 with state COLLECTING + same d-tag on Advance (SPEC-031)', async () => {
+    const user = userEvent.setup();
+    const dSlug = 'spec031-advance';
+    publishDraftPile(dSlug);
+
+    render(
+      <PileDetail
+        pileRef={{ kind: PILE_EVENT_KIND, pubkey: builderPk, d: dSlug }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Detail test pile')).toBeTruthy();
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Advance' }));
+
+    // Wait until a *second* kind-30078 (the republish) lands on the relay.
+    await waitFor(
+      () => {
+        const matches = mockState.events.filter(
+          (e) =>
+            e.kind === PILE_EVENT_KIND &&
+            e.tags.some((t) => t[0] === 'd' && t[1] === dSlug),
+        );
+        if (matches.length < 2) {
+          throw new Error(`expected 2 kind-30078, got ${matches.length}`);
+        }
+      },
+      { timeout: 5000 },
+    );
+
+    const matches = mockState.events.filter(
+      (e) =>
+        e.kind === PILE_EVENT_KIND &&
+        e.tags.some((t) => t[0] === 'd' && t[1] === dSlug),
+    );
+    const republished = matches[matches.length - 1]!;
+    const decoded = parsePile({
+      kind: republished.kind ?? PILE_EVENT_KIND,
+      content: republished.content,
+      tags: republished.tags,
+      ...(republished.created_at !== undefined ? { created_at: republished.created_at } : {}),
+      ...(republished.pubkey !== undefined ? { pubkey: republished.pubkey } : {}),
+    });
+    expect(decoded).not.toBeNull();
+    expect(decoded?.state).toBe('COLLECTING');
+    expect(decoded?.d).toBe(dSlug);
+  });
+
+  it('republishes a kind-30078 with layers[0].completed === true when layer 1 is toggled (SPEC-031)', async () => {
+    const user = userEvent.setup();
+    const dSlug = 'spec031-layer';
+    publishDraftPile(dSlug);
+
+    render(
+      <PileDetail
+        pileRef={{ kind: PILE_EVENT_KIND, pubkey: builderPk, d: dSlug }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Detail test pile')).toBeTruthy();
+    });
+
+    // The LayerChecklist renders a row for each layer; layer 1 is the
+    // first checkbox. Toggle it.
+    const checkboxes = screen.getAllByRole('checkbox');
+    const layerOne = checkboxes[0]!;
+    await user.click(layerOne);
+
+    await waitFor(
+      () => {
+        const matches = mockState.events.filter(
+          (e) =>
+            e.kind === PILE_EVENT_KIND &&
+            e.tags.some((t) => t[0] === 'd' && t[1] === dSlug),
+        );
+        if (matches.length < 2) {
+          throw new Error(`expected 2 kind-30078, got ${matches.length}`);
+        }
+      },
+      { timeout: 5000 },
+    );
+
+    const matches = mockState.events.filter(
+      (e) =>
+        e.kind === PILE_EVENT_KIND &&
+        e.tags.some((t) => t[0] === 'd' && t[1] === dSlug),
+    );
+    const republished = matches[matches.length - 1]!;
+    const decoded = parsePile({
+      kind: republished.kind ?? PILE_EVENT_KIND,
+      content: republished.content,
+      tags: republished.tags,
+      ...(republished.created_at !== undefined ? { created_at: republished.created_at } : {}),
+      ...(republished.pubkey !== undefined ? { pubkey: republished.pubkey } : {}),
+    });
+    expect(decoded).not.toBeNull();
+    const layer1 = decoded?.layers.find((l) => l.index === 1);
+    expect(layer1?.completed).toBe(true);
+  });
+
+  it('updates the rendered state when an incoming kind-30078 has a newer created_at (SPEC-031 LWW)', async () => {
+    const dSlug = 'spec031-lww';
+    publishDraftPile(dSlug);
+
+    render(
+      <PileDetail
+        pileRef={{ kind: PILE_EVENT_KIND, pubkey: builderPk, d: dSlug }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Draft')).toBeTruthy();
+    });
+
+    // Simulate another device editing the same pile and the relay
+    // pushing the newer event back to us. `created_at` must be strictly
+    // greater than the original draft (encoded with `Math.floor(Date.now()/1000)`).
+    const futureCreatedAt = Math.floor(Date.now() / 1000) + 60;
+    const fresher: Pile = {
+      d: dSlug,
+      name: 'Detail test pile',
+      builder: builderPk,
+      dimensions: { length: 2, width: 2, height: 2 },
+      presetId: 'standard',
+      plannedBuildDate: Math.floor(Date.now() / 1000) + 86400,
+      timezone: 'UTC',
+      layers: [],
+      turnRecords: [],
+      state: 'CURING',
+      photos: [],
+      version: 1,
+    };
+    const enc = encodePile(fresher);
+    await mockState.publish({
+      id: 'pile-id-lww-newer',
+      kind: enc.kind,
+      content: enc.content,
+      tags: enc.tags,
+      created_at: futureCreatedAt,
+      pubkey: builderPk,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Curing')).toBeTruthy();
     });
   });
 });

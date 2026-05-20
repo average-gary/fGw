@@ -8,13 +8,23 @@
  *   - photo gallery with Blossom upload,
  *   - state controls: Advance / Abandon (confirms first).
  *
- * Layer/turn-record/photo edits are kept in local React state for now;
- * SPEC-021.next will round-trip them back as a fresh kind-30078 publish.
+ * SPEC-031 — every meaningful mutation (toggle layer, save turn record,
+ * add photo, advance/abandon) round-trips back to the relay as a fresh
+ * kind-30078 publish via `republishPile`. We optimistically update local
+ * state, show an inline "Saving…" spinner, and roll back on failure.
+ *
+ * Cross-device sync rule (last-writer-wins):
+ *   We track `publishedAt` — the `created_at` of the freshest kind-30078
+ *   we've observed for this `(pubkey, d)` pair. Incoming events with a
+ *   `created_at >= publishedAt` overwrite the working copy; older events
+ *   are dropped. We use `>=` (not `>`) so a relay-echoed copy of our own
+ *   just-published event is treated as a no-op (the working copy is
+ *   already structurally identical to what we encoded).
  *
  * The prop is named `pileRef` (not `ref`) because React reserves the bare
  * `ref` prop for `forwardRef` — same workaround pattern as ListingDetail.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { NDKEvent, NostrEvent } from '@nostr-dev-kit/ndk';
 
 import { Badge } from '@/components/ui/Badge';
@@ -35,8 +45,10 @@ import { getNdk } from '@/lib/ndk';
 import { uploadPhoto } from '@/lib/blossom';
 import { parsePile, PILE_EVENT_KIND } from '@/lib/pile/events';
 import { nextState } from '@/lib/pile/state';
+import { PilePublishError, republishPile } from '@/lib/pile/publish';
 import type { LayerRecord, Pile, TurnRecord } from '@/lib/pile/types';
 import type { AddressableRef } from '@/lib/listings/types';
+import { usePublishGuard } from '@/lib/pyramid';
 import { PILE_STATE_BADGES } from '@/components/pile/wizardUtils';
 
 type SubHandle = {
@@ -54,6 +66,8 @@ interface SubscribeShape {
 
 interface PileLoadState {
   pile: Pile | null;
+  /** `created_at` of the freshest event we've seen, or 0 if none. */
+  publishedAt: number;
   loaded: boolean;
 }
 
@@ -63,15 +77,25 @@ function rawFrom(e: NostrEvent | NDKEvent): NostrEvent {
     : (e as NostrEvent);
 }
 
+/**
+ * Subscribe to kind-30078 events for `(pubkey, d)`. Last-writer-wins on
+ * `created_at`: an incoming event whose `created_at >= publishedAt`
+ * replaces the cached pile and bumps `publishedAt`. Stale events are
+ * dropped silently.
+ */
 function usePileByRef(ref: AddressableRef): PileLoadState {
-  const [state, setState] = useState<PileLoadState>({ pile: null, loaded: false });
+  const [state, setState] = useState<PileLoadState>({
+    pile: null,
+    publishedAt: 0,
+    loaded: false,
+  });
 
   useEffect(() => {
-    setState({ pile: null, loaded: false });
+    setState({ pile: null, publishedAt: 0, loaded: false });
     const ndk = getNdk() as unknown as SubscribeShape;
     let active = true;
     if (typeof ndk.subscribe !== 'function') {
-      setState({ pile: null, loaded: true });
+      setState({ pile: null, publishedAt: 0, loaded: true });
       return undefined;
     }
 
@@ -90,7 +114,12 @@ function usePileByRef(ref: AddressableRef): PileLoadState {
         ...(raw.pubkey !== undefined ? { pubkey: raw.pubkey } : {}),
       });
       if (!parsed) return;
-      setState({ pile: parsed, loaded: true });
+      const ts = raw.created_at ?? 0;
+      setState((prev) => {
+        // LWW: only accept events at least as fresh as what we have.
+        if (prev.publishedAt && ts < prev.publishedAt) return prev;
+        return { pile: parsed, publishedAt: ts, loaded: true };
+      });
     };
 
     const sub = ndk.subscribe(
@@ -120,23 +149,32 @@ export interface PileDetailProps {
 
 export function PileDetail({ pileRef: ref, onBack }: PileDetailProps) {
   const toast = useToast();
-  const { pile: loadedPile, loaded } = usePileByRef(ref);
+  const { guard } = usePublishGuard();
+  const { pile: loadedPile, publishedAt, loaded } = usePileByRef(ref);
 
-  // Local working copy — edits are kept here until SPEC-021.next.
+  // Local working copy. Initializes from the subscribed pile and re-syncs
+  // whenever a fresher kind-30078 (LWW on `publishedAt`) lands. We track
+  // the last `publishedAt` we synced from so a stale or equal-time
+  // re-render doesn't clobber the user's mid-edit working copy.
   const [working, setWorking] = useState<Pile | null>(null);
+  const lastSyncedAtRef = useRef<number>(0);
   useEffect(() => {
-    if (loadedPile) setWorking(loadedPile);
-  }, [loadedPile]);
+    if (!loadedPile) return;
+    if (publishedAt < lastSyncedAtRef.current) return;
+    setWorking(loadedPile);
+    lastSyncedAtRef.current = publishedAt;
+  }, [loadedPile, publishedAt]);
 
   const [tempC, setTempC] = useState('');
   const [moisture, setMoisture] = useState('');
   const [notes, setNotes] = useState('');
   const [confirmAbandon, setConfirmAbandon] = useState(false);
   const [photoBusy, setPhotoBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
   // Photos uploaded via Blossom carry the listing-shape `PhotoRef` (sha256
   // + dim + mime + sizeBytes). The pile schema only persists `{url, hash}`.
   // We keep both: the rich list drives the gallery, the pile-shape list is
-  // what we'll round-trip when persistence lands (SPEC-021.next).
+  // what we round-trip on republish.
   const [photoUploads, setPhotoUploads] = useState<ListingPhotoRef[]>([]);
 
   const layerCount = useMemo(
@@ -153,26 +191,72 @@ export function PileDetail({ pileRef: ref, onBack }: PileDetailProps) {
     return 6;
   }, [working]);
 
-  function toggleLayer(index: number): void {
-    setWorking((prev) => {
-      if (!prev) return prev;
-      const idx = prev.layers.findIndex((l) => l.index === index);
-      const now = Math.floor(Date.now() / 1000);
-      if (idx >= 0) {
-        const layer = prev.layers[idx] as LayerRecord;
-        const updated: LayerRecord = layer.completed
-          ? { ...layer, completed: false, completedAt: undefined }
-          : { ...layer, completed: true, completedAt: now };
-        const layers = prev.layers.slice();
-        layers[idx] = updated;
-        return advanceFromLayerToggle({ ...prev, layers });
+  /**
+   * Optimistically update local state, then publish. On failure, roll
+   * back via the snapshot we captured before the mutation. `guard`
+   * intercepts pyramid `restricted`/`auth-required` rejections and
+   * raises the not-a-member sheet (SPEC-025).
+   */
+  async function persist(
+    next: Pile,
+    rollback: Pile,
+    label: string,
+  ): Promise<void> {
+    setSaving(true);
+    try {
+      const result = await guard(() =>
+        republishPile(next, { previousState: rollback.state }),
+      );
+      // `guard` returns `null` when blocked by pyramid; the sheet shows.
+      if (result === null) {
+        setWorking(rollback);
       }
+    } catch (err) {
+      setWorking(rollback);
+      if (err instanceof PilePublishError) {
+        if (err.kind === 'no-signer') {
+          toast.warning('Sign in required', 'Connect a key to save changes.');
+        } else if (err.kind === 'invalid-state') {
+          toast.danger(`Could not ${label}`, err.message);
+        } else if (err.kind === 'forbidden') {
+          toast.danger(`Could not ${label}`, 'Relay rejected the publish.');
+        } else {
+          toast.danger(`Could not ${label}`, err.message);
+        }
+      } else {
+        toast.danger(
+          `Could not ${label}`,
+          err instanceof Error ? err.message : 'Try again.',
+        );
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function toggleLayer(index: number): void {
+    if (!working) return;
+    const rollback = working;
+    const idx = working.layers.findIndex((l) => l.index === index);
+    const now = Math.floor(Date.now() / 1000);
+    let nextWorking: Pile;
+    if (idx >= 0) {
+      const layer = working.layers[idx] as LayerRecord;
+      const updated: LayerRecord = layer.completed
+        ? { ...layer, completed: false, completedAt: undefined }
+        : { ...layer, completed: true, completedAt: now };
+      const layers = working.layers.slice();
+      layers[idx] = updated;
+      nextWorking = advanceFromLayerToggle({ ...working, layers });
+    } else {
       const layer: LayerRecord = { index, completed: true, completedAt: now };
-      return advanceFromLayerToggle({
-        ...prev,
-        layers: [...prev.layers, layer].sort((a, b) => a.index - b.index),
+      nextWorking = advanceFromLayerToggle({
+        ...working,
+        layers: [...working.layers, layer].sort((a, b) => a.index - b.index),
       });
-    });
+    }
+    setWorking(nextWorking);
+    void persist(nextWorking, rollback, 'save layer');
   }
 
   /**
@@ -191,6 +275,7 @@ export function PileDetail({ pileRef: ref, onBack }: PileDetailProps) {
 
   function recordTurn(): void {
     if (!working) return;
+    const rollback = working;
     const t = Number(tempC);
     const m = Number(moisture);
     const rec: TurnRecord = { index: nextTurnIndex };
@@ -199,44 +284,45 @@ export function PileDetail({ pileRef: ref, onBack }: PileDetailProps) {
     if (notes.trim()) rec.notes = notes.trim();
     rec.completedAt = Math.floor(Date.now() / 1000);
 
-    setWorking((prev) => {
-      if (!prev) return prev;
-      const others = prev.turnRecords.filter((r) => r.index !== nextTurnIndex);
-      return {
-        ...prev,
-        turnRecords: [...others, rec].sort((a, b) => a.index - b.index),
-        state: prev.state === 'BUILDING' ? 'ACTIVE_TURNS' : prev.state,
-      };
-    });
+    const others = working.turnRecords.filter((r) => r.index !== nextTurnIndex);
+    const nextWorking: Pile = {
+      ...working,
+      turnRecords: [...others, rec].sort((a, b) => a.index - b.index),
+      state: working.state === 'BUILDING' ? 'ACTIVE_TURNS' : working.state,
+    };
+    setWorking(nextWorking);
     setTempC('');
     setMoisture('');
     setNotes('');
+    void persist(nextWorking, rollback, 'log turn');
   }
 
   function advanceState(): void {
-    setWorking((prev) => {
-      if (!prev) return prev;
-      const next = nextState(prev.state, 'advance');
-      if (!next) {
-        toast.warning('No further state', `Cannot advance from ${prev.state}.`);
-        return prev;
-      }
-      return { ...prev, state: next };
-    });
+    if (!working) return;
+    const rollback = working;
+    const next = nextState(working.state, 'advance');
+    if (!next) {
+      toast.warning('No further state', `Cannot advance from ${working.state}.`);
+      return;
+    }
+    const nextWorking: Pile = { ...working, state: next };
+    setWorking(nextWorking);
+    void persist(nextWorking, rollback, 'advance state');
   }
 
   function abandonPile(): void {
+    if (!working) return;
     if (!confirmAbandon) {
       setConfirmAbandon(true);
       return;
     }
-    setWorking((prev) => {
-      if (!prev) return prev;
-      const next = nextState(prev.state, 'abandon');
-      if (!next) return prev;
-      return { ...prev, state: next };
-    });
+    const rollback = working;
+    const next = nextState(working.state, 'abandon');
     setConfirmAbandon(false);
+    if (!next) return;
+    const nextWorking: Pile = { ...working, state: next };
+    setWorking(nextWorking);
+    void persist(nextWorking, rollback, 'abandon pile');
   }
 
   async function handlePhotoFiles(files: FileList | null): Promise<void> {
@@ -249,14 +335,17 @@ export function PileDetail({ pileRef: ref, onBack }: PileDetailProps) {
           setPhotoUploads((prev) =>
             prev.some((p) => p.sha256 === upload.sha256) ? prev : [...prev, upload],
           );
-          setWorking((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  photos: [...prev.photos, { url: upload.url, hash: upload.sha256 }],
-                }
-              : prev,
-          );
+          // Capture rollback BEFORE applying the optimistic update so a
+          // failed republish restores the pre-add state.
+          const rollback = working;
+          if (!rollback) continue;
+          if (rollback.photos.some((p) => p.hash === upload.sha256)) continue;
+          const nextWorking: Pile = {
+            ...rollback,
+            photos: [...rollback.photos, { url: upload.url, hash: upload.sha256 }],
+          };
+          setWorking(nextWorking);
+          await persist(nextWorking, rollback, 'add photo');
         } catch (err) {
           toast.danger(
             'Photo upload failed',
@@ -270,10 +359,15 @@ export function PileDetail({ pileRef: ref, onBack }: PileDetailProps) {
   }
 
   function removePhoto(sha256: string): void {
+    if (!working) return;
+    const rollback = working;
     setPhotoUploads((prev) => prev.filter((p) => p.sha256 !== sha256));
-    setWorking((prev) =>
-      prev ? { ...prev, photos: prev.photos.filter((p) => p.hash !== sha256) } : prev,
-    );
+    const nextWorking: Pile = {
+      ...working,
+      photos: working.photos.filter((p) => p.hash !== sha256),
+    };
+    setWorking(nextWorking);
+    void persist(nextWorking, rollback, 'remove photo');
   }
 
   if (!loaded) {
@@ -318,6 +412,16 @@ export function PileDetail({ pileRef: ref, onBack }: PileDetailProps) {
           <span className="font-mono text-xs text-soil-500">
             {working.dimensions.length}×{working.dimensions.width}×{working.dimensions.height} m
           </span>
+          {saving && (
+            <span
+              className="ml-auto inline-flex items-center gap-1 text-xs text-soil-500"
+              role="status"
+              aria-label="Saving"
+            >
+              <Spinner size="sm" />
+              Saving…
+            </span>
+          )}
         </div>
         <h1 className="font-serif text-3xl text-soil-900 leading-tight">{working.name}</h1>
         {working.locationText && (

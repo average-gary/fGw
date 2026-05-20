@@ -146,18 +146,25 @@ vi.mock('@/lib/ndk', () => ({
   addRelay: () => {},
 }));
 
-// Mock the lib/listings/claim module to control `claim()` and to control
-// what `subscribeClaimsFor` emits. We re-export `Claim` shape via re-import.
+// Mock the lib/listings/claim module to control `claim()`, `fulfill()`,
+// and to control what `subscribeClaimsFor` / `subscribeFulfillmentFor`
+// emit. We re-export `Claim`/`FulfillmentEvent` shapes via re-import.
 const mockClaimsState = vi.hoisted(() => ({
   claimSpy: vi.fn((..._args: unknown[]) => Promise.resolve(undefined)),
+  fulfillSpy: vi.fn((..._args: unknown[]) => Promise.resolve(undefined)),
   pushedFns: [] as Array<(claims: unknown[]) => void>,
+  pushedFulfillFns: [] as Array<(events: unknown[]) => void>,
   setClaims(claims: unknown[]) {
     for (const fn of this.pushedFns) fn(claims);
+  },
+  setFulfillments(events: unknown[]) {
+    for (const fn of this.pushedFulfillFns) fn(events);
   },
 }));
 
 vi.mock('@/lib/listings/claim', () => ({
   claim: (...args: unknown[]) => mockClaimsState.claimSpy(...args),
+  fulfill: (...args: unknown[]) => mockClaimsState.fulfillSpy(...args),
   subscribeClaimsFor: (_target: unknown) => ({
     subscribe(handler: (claims: unknown[]) => void) {
       mockClaimsState.pushedFns.push(handler);
@@ -170,8 +177,20 @@ vi.mock('@/lib/listings/claim', () => ({
       };
     },
   }),
+  subscribeFulfillmentFor: (_target: unknown) => ({
+    subscribe(handler: (events: unknown[]) => void) {
+      mockClaimsState.pushedFulfillFns.push(handler);
+      handler([]);
+      return () => {
+        mockClaimsState.pushedFulfillFns = mockClaimsState.pushedFulfillFns.filter(
+          (f) => f !== handler,
+        );
+      };
+    },
+  }),
   CLAIM_KIND: 1,
   CLAIM_TAG: 'claim',
+  FULFILLED_TAG: 'fulfilled',
   ClaimError: class ClaimError extends Error {
     kind = 'no-signer' as const;
   },
@@ -317,7 +336,10 @@ beforeEach(() => {
   resetRelay();
   mockClaimsState.claimSpy.mockReset();
   mockClaimsState.claimSpy.mockResolvedValue(undefined);
+  mockClaimsState.fulfillSpy.mockReset();
+  mockClaimsState.fulfillSpy.mockResolvedValue(undefined);
   mockClaimsState.pushedFns = [];
+  mockClaimsState.pushedFulfillFns = [];
   reviewSpy.mockReset();
   reviewSpy.mockResolvedValue(undefined);
   clearSigner();
@@ -410,6 +432,105 @@ describe('SPEC-020 ListingDetail', () => {
     await waitFor(() => {
       expect(screen.getByText(/Leave a review/i)).toBeTruthy();
     });
+  });
+
+  it('Mark fulfilled (author) calls fulfill() with the listing ref and reveals the review form', async () => {
+    publishListing();
+    setSignerForPubkey(authorPk);
+    const user = userEvent.setup();
+    render(<ListingDetail listingRef={makeRef()} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Aged compost — pickup in High View'),
+      ).toBeTruthy();
+    });
+    await act(async () => {
+      mockClaimsState.setClaims(makeTwoClaims());
+    });
+    await waitFor(() => {
+      expect(screen.getAllByTestId('claim-row').length).toBe(2);
+    });
+
+    expect(screen.queryByText(/Leave a review/i)).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Mark fulfilled' }));
+
+    await waitFor(() => {
+      expect(mockClaimsState.fulfillSpy).toHaveBeenCalledTimes(1);
+    });
+    const [refArg] = mockClaimsState.fulfillSpy.mock.calls[0]!;
+    expect(refArg).toEqual(makeRef());
+    // Review form opens for the author optimistically.
+    await waitFor(() => {
+      expect(screen.getByText(/Leave a review/i)).toBeTruthy();
+    });
+  });
+
+  it("claimer's review form opens automatically when an author-authored fulfillment marker arrives (cross-device coherence)", async () => {
+    publishListing();
+    // Render as the *claimer*, not the author.
+    setSignerForPubkey(claimerPkA);
+    render(<ListingDetail listingRef={makeRef()} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Aged compost — pickup in High View'),
+      ).toBeTruthy();
+    });
+
+    // The claimer needs to appear in the claims list so the route treats
+    // them as a participant (only participants see the review form).
+    await act(async () => {
+      mockClaimsState.setClaims(makeTwoClaims());
+    });
+
+    // No fulfillment yet → review form stays closed.
+    expect(screen.queryByText(/Leave a review/i)).toBeNull();
+    // Claimer also has no "Mark fulfilled" button (only the author does).
+    expect(
+      screen.queryByRole('button', { name: 'Mark fulfilled' }),
+    ).toBeNull();
+
+    // Author's marker arrives via the subscription — without the claimer
+    // tapping anything, the review form should open on their device.
+    await act(async () => {
+      mockClaimsState.setFulfillments([
+        {
+          id: 'fulfill-1',
+          createdAt: 1_700_003_000,
+        },
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Leave a review/i)).toBeTruthy();
+    });
+  });
+
+  it('a fulfillment marker authored by a non-listing pubkey is ignored upstream and the review form stays closed', async () => {
+    // The lib's `subscribeFulfillmentFor` filters spoofed events at parse
+    // time, so by the time it reaches this component the array would be
+    // empty. We simulate that by simply not pushing the spoofed event.
+    publishListing();
+    setSignerForPubkey(claimerPkA);
+    render(<ListingDetail listingRef={makeRef()} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Aged compost — pickup in High View'),
+      ).toBeTruthy();
+    });
+    await act(async () => {
+      mockClaimsState.setClaims(makeTwoClaims());
+    });
+    // The relay-side spoof guard means the lib emits an empty array even
+    // though a malicious event was published. Push that empty emission.
+    await act(async () => {
+      mockClaimsState.setFulfillments([]);
+    });
+
+    expect(screen.queryByText(/Leave a review/i)).toBeNull();
   });
 
   it('submits a +1 review with the right args (target = oldest claimer, ref = listing)', async () => {

@@ -4,9 +4,6 @@
  * Pure functions extracted to keep `routes/NewPile.tsx` under the 500-LOC
  * cap. No React, no side effects.
  */
-import { NDKEvent, type NDKSigner } from '@nostr-dev-kit/ndk';
-import type { NostrEvent } from '@nostr-dev-kit/ndk';
-import { getNdk } from '@/lib/ndk';
 import {
   PILE_MIN_DIMENSIONS,
   PILE_PRESETS,
@@ -15,6 +12,9 @@ import {
 } from '@/domain/fgw';
 import type { LaborEvent as PileLaborEvent, PileState } from '@/lib/pile/types';
 import type { LaborEvent } from '@/lib/events/types';
+// SPEC-031: signAndPublish moved to lib/pile/publish.ts so PileDetail can
+// reuse it. Re-exported here to keep NewPile's import path stable.
+export { signAndPublish } from '@/lib/pile/publish';
 
 export type PileBadgeVariant = 'default' | 'success' | 'warning' | 'muted' | 'danger';
 
@@ -31,10 +31,6 @@ export const PILE_STATE_BADGES: Record<
   CONSUMED: { variant: 'success', label: 'Consumed' },
   ABANDONED: { variant: 'danger', label: 'Abandoned' },
 };
-
-export interface NdkPublisher {
-  publish?: (e: NostrEvent) => Promise<unknown> | unknown;
-}
 
 export function deviceTimezone(): string {
   try {
@@ -105,28 +101,3 @@ export function asCalendarEvent(ev: PileLaborEvent): LaborEvent {
   };
 }
 
-/**
- * Sign + publish an unsigned envelope through the chapter-bound NDK. The
- * relay shape may expose either `publish(rawEvent)` (test mock) or
- * `NDKEvent.publish()` (real NDK); we accept both.
- */
-export async function signAndPublish(
-  signer: NDKSigner,
-  envelope: { kind: number; content: string; tags: string[][]; created_at: number },
-): Promise<void> {
-  const ndk = getNdk();
-  const ev = new NDKEvent(ndk, {
-    kind: envelope.kind,
-    content: envelope.content,
-    tags: envelope.tags,
-    created_at: envelope.created_at,
-    pubkey: (await signer.user()).pubkey,
-  } as unknown as NostrEvent);
-  await ev.sign(signer);
-  const maybe = ndk as unknown as NdkPublisher;
-  if (typeof maybe.publish === 'function') {
-    await maybe.publish(ev.rawEvent() as unknown as NostrEvent);
-  } else {
-    await ev.publish();
-  }
-}

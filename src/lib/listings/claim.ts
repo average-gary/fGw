@@ -15,6 +15,7 @@ import type { AddressableRef } from './types';
 
 export const CLAIM_KIND = 1 as const;
 export const CLAIM_TAG = 'claim' as const;
+export const FULFILLED_TAG = 'fulfilled' as const;
 
 export interface Claim {
   id: string;
@@ -94,9 +95,80 @@ export async function claim(
   return ev;
 }
 
+/**
+ * Publish a fulfillment marker (kind-1 with `t:fulfilled`) for a listing.
+ *
+ * Posted by the listing author when both sides have completed the handoff.
+ * Other clients subscribed to `subscribeFulfillmentFor(ref)` will see the
+ * marker and unlock their review form without each device having to flip a
+ * local flag — see SPEC-032.
+ *
+ * Tags emitted:
+ *   - `['e', claimEventId, '', 'mention']` (only when claimEventId given)
+ *   - `['a', '30402:<pubkey>:<d>']`
+ *   - `['t', 'fulfilled']`
+ *
+ * Throws `ClaimError('no-signer')` when no signer is available — same
+ * auth-gate as `claim()`.
+ */
+export async function fulfill(
+  listingRef: AddressableRef,
+  claimEventId?: string,
+): Promise<NDKEvent> {
+  const signer = useAuthStore.getState().signer;
+  if (!signer) {
+    throw new ClaimError('no-signer', 'fulfill requires an authenticated signer');
+  }
+  const ndk = getNdk();
+  (ndk as unknown as { signer?: unknown }).signer = signer;
+
+  const tags: string[][] = [];
+  if (claimEventId) tags.push(['e', claimEventId, '', 'mention']);
+  tags.push(['a', refToA(listingRef)]);
+  tags.push(['t', FULFILLED_TAG]);
+
+  const ev = new NDKEvent(ndk, {
+    kind: CLAIM_KIND,
+    content: '',
+    tags,
+    created_at: Math.floor(Date.now() / 1000),
+  } as Partial<NostrEvent>);
+
+  const maybe = ndk as unknown as {
+    publish?: (e: NostrEvent) => Promise<unknown> | unknown;
+  };
+  if (typeof maybe.publish === 'function') {
+    ev.pubkey = (await signer.user()).pubkey;
+    ev.id = '';
+    ev.sig = await signer.sign(ev.rawEvent());
+    ev.id = ev.getEventHash();
+    await maybe.publish(ev.rawEvent());
+    return ev;
+  }
+  await ev.sign();
+  await ev.publish();
+  return ev;
+}
+
 /** Minimal Observable surface (no rxjs). */
 export interface ClaimSubscription {
   subscribe(handler: (claims: Claim[]) => void): () => void;
+}
+
+/**
+ * A fulfillment marker observed on the relay. We carry only what consumers
+ * need to react: the event id (for dedup), wallclock createdAt (for
+ * ordering), and the optional referenced claim event id (`e` tag) — enough
+ * for a UI to highlight which claim was fulfilled if multiple are pending.
+ */
+export interface FulfillmentEvent {
+  id: string;
+  createdAt: number;
+  claimEventId?: string;
+}
+
+export interface FulfillmentSubscription {
+  subscribe(handler: (events: FulfillmentEvent[]) => void): () => void;
 }
 
 interface NdkSubscriber {
@@ -189,4 +261,67 @@ export function subscribeMyInbox(myPubkey: string): ClaimSubscription {
     { kinds: [CLAIM_KIND], '#t': [CLAIM_TAG] },
     (c) => c.targetRef?.pubkey === myPubkey,
   );
+}
+
+function parseFulfillment(
+  raw: NostrEvent,
+  expectedA: string,
+  expectedAuthor: string,
+): FulfillmentEvent | null {
+  if (raw.kind !== CLAIM_KIND) return null;
+  if (!raw.tags.some((t) => t[0] === 't' && t[1] === FULFILLED_TAG)) return null;
+  // Spoof guard: a fulfillment marker is only valid when authored by the
+  // listing author themselves. Relays cannot enforce this (we can't write
+  // a "kind-1 from author X with tag t:fulfilled and a:<addr>" filter that
+  // limits author per-`a`), so we filter at receive time. Anyone else
+  // posting a `t:fulfilled` reply against the listing is dropped silently.
+  if (raw.pubkey !== expectedAuthor) return null;
+  if (!raw.tags.some((t) => t[0] === 'a' && t[1] === expectedA)) return null;
+  const eTag = raw.tags.find((t) => t[0] === 'e');
+  const out: FulfillmentEvent = {
+    id: raw.id ?? '',
+    createdAt: raw.created_at,
+  };
+  if (eTag?.[1]) out.claimEventId = eTag[1];
+  return out;
+}
+
+/**
+ * Subscribe to fulfillment markers (kind-1 with `t:fulfilled`) for a
+ * specific addressable listing. Honors only events authored by the listing
+ * author — see `parseFulfillment` for the spoof-guard rationale.
+ */
+export function subscribeFulfillmentFor(
+  ref: AddressableRef,
+): FulfillmentSubscription {
+  const aValue = refToA(ref);
+  return {
+    subscribe(handler) {
+      const ndk = getNdk() as unknown as NdkSubscriber;
+      const seen = new Map<string, FulfillmentEvent>();
+      const emit = (): void => {
+        handler(
+          Array.from(seen.values()).sort((a, b) => a.createdAt - b.createdAt),
+        );
+      };
+      const onEvent = (e: NostrEvent | NDKEvent): void => {
+        const raw = (e as NDKEvent).rawEvent
+          ? ((e as NDKEvent).rawEvent() as unknown as NostrEvent)
+          : (e as NostrEvent);
+        const f = parseFulfillment(raw, aValue, ref.pubkey);
+        if (!f || !f.id || seen.has(f.id)) return;
+        seen.set(f.id, f);
+        emit();
+      };
+      const sub = ndk.subscribe(
+        { kinds: [CLAIM_KIND], '#a': [aValue], '#t': [FULFILLED_TAG] },
+        { onEvent },
+      );
+      if (typeof sub?.on === 'function') sub.on('event', onEvent);
+      return () => {
+        if (sub && typeof sub.stop === 'function') sub.stop();
+        else if (sub && typeof sub.close === 'function') sub.close();
+      };
+    },
+  };
 }

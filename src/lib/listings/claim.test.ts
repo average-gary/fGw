@@ -137,9 +137,12 @@ import { useAuthStore } from '../auth';
 import {
   CLAIM_KIND,
   CLAIM_TAG,
+  FULFILLED_TAG,
   ClaimError,
   claim,
+  fulfill,
   subscribeClaimsFor,
+  subscribeFulfillmentFor,
 } from './claim';
 import type { AddressableRef } from './types';
 
@@ -285,6 +288,191 @@ describe('SPEC-015 claims', () => {
       `31923:${'h'.repeat(64)}:work-day-2025-05-19`,
     ]);
     expect(sub!.filter['#t']).toEqual([CLAIM_TAG]);
+    unsub();
+  });
+});
+
+describe('SPEC-032 fulfillment markers', () => {
+  it('fulfill() emits a kind-1 with t:fulfilled, a-tag, and an e-tag mention when given a claim id', async () => {
+    const sk = generateSecretKey();
+    setSigner(sk);
+    const ownerPk = getPublicKey(sk);
+    const target: AddressableRef = {
+      kind: 30402,
+      pubkey: ownerPk,
+      d: 'finished-compost-001',
+    };
+
+    await fulfill(target, 'i'.repeat(64));
+
+    expect(mockState.events.length).toBe(1);
+    const ev = mockState.events[0]!;
+    expect(ev.kind).toBe(CLAIM_KIND);
+    expect(ev.content).toBe('');
+    expect(ev.pubkey).toBe(ownerPk);
+    expect(ev.tags).toContainEqual(['e', 'i'.repeat(64), '', 'mention']);
+    expect(ev.tags).toContainEqual([
+      'a',
+      `30402:${ownerPk}:finished-compost-001`,
+    ]);
+    expect(ev.tags).toContainEqual(['t', FULFILLED_TAG]);
+  });
+
+  it('fulfill() omits the e-tag when no claim id is given', async () => {
+    const sk = generateSecretKey();
+    setSigner(sk);
+    const ownerPk = getPublicKey(sk);
+    const target: AddressableRef = {
+      kind: 30402,
+      pubkey: ownerPk,
+      d: 'free-leaves',
+    };
+
+    await fulfill(target);
+
+    expect(mockState.events.length).toBe(1);
+    const ev = mockState.events[0]!;
+    expect(ev.tags.some((t) => t[0] === 'e')).toBe(false);
+    expect(ev.tags).toContainEqual(['t', FULFILLED_TAG]);
+  });
+
+  it("fulfill() throws ClaimError('no-signer') without a signer", async () => {
+    const target: AddressableRef = {
+      kind: 30402,
+      pubkey: 'a'.repeat(64),
+      d: 'x',
+    };
+    let caught: unknown;
+    try {
+      await fulfill(target);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ClaimError);
+    expect((caught as ClaimError).kind).toBe('no-signer');
+  });
+
+  it('subscribeFulfillmentFor honors only events authored by the listing pubkey (spoof guard)', async () => {
+    const ownerPk = 'j'.repeat(64);
+    const target: AddressableRef = {
+      kind: 30402,
+      pubkey: ownerPk,
+      d: 'spoof-test',
+    };
+    const aValue = `30402:${ownerPk}:spoof-test`;
+
+    // Real fulfillment from the listing author.
+    const real: RelayEvent = {
+      id: 'k'.repeat(64),
+      kind: CLAIM_KIND,
+      pubkey: ownerPk,
+      content: '',
+      created_at: 5000,
+      tags: [
+        ['a', aValue],
+        ['t', FULFILLED_TAG],
+      ],
+    };
+    // Spoofed fulfillment from a non-author pubkey — must be dropped.
+    const spoof: RelayEvent = {
+      id: 'l'.repeat(64),
+      kind: CLAIM_KIND,
+      pubkey: 'm'.repeat(64),
+      content: '',
+      created_at: 6000,
+      tags: [
+        ['a', aValue],
+        ['t', FULFILLED_TAG],
+      ],
+    };
+
+    await mockState.publish(real);
+    await mockState.publish(spoof);
+
+    const snapshots: Array<{ id: string; createdAt: number }[]> = [];
+    const unsub = subscribeFulfillmentFor(target).subscribe((events) => {
+      snapshots.push(events.map((e) => ({ id: e.id, createdAt: e.createdAt })));
+    });
+    await Promise.resolve();
+
+    const final = snapshots[snapshots.length - 1]!;
+    expect(final.length).toBe(1);
+    expect(final[0]!.id).toBe('k'.repeat(64));
+    unsub();
+  });
+
+  it('subscribeFulfillmentFor dedupes by id and emits in ascending createdAt order', async () => {
+    const ownerPk = 'n'.repeat(64);
+    const target: AddressableRef = {
+      kind: 30402,
+      pubkey: ownerPk,
+      d: 'dedupe-test',
+    };
+    const aValue = `30402:${ownerPk}:dedupe-test`;
+
+    const evLater: RelayEvent = {
+      id: 'o'.repeat(64),
+      kind: CLAIM_KIND,
+      pubkey: ownerPk,
+      content: '',
+      created_at: 9000,
+      tags: [
+        ['e', 'q'.repeat(64), '', 'mention'],
+        ['a', aValue],
+        ['t', FULFILLED_TAG],
+      ],
+    };
+    const evEarlier: RelayEvent = {
+      id: 'p'.repeat(64),
+      kind: CLAIM_KIND,
+      pubkey: ownerPk,
+      content: '',
+      created_at: 8000,
+      tags: [
+        ['a', aValue],
+        ['t', FULFILLED_TAG],
+      ],
+    };
+    const dup: RelayEvent = { ...evLater };
+
+    await mockState.publish(evLater);
+    await mockState.publish(evEarlier);
+    await mockState.publish(dup);
+
+    const snapshots: Array<{ id: string; createdAt: number; claimEventId?: string }[]> = [];
+    const unsub = subscribeFulfillmentFor(target).subscribe((events) => {
+      snapshots.push(
+        events.map((e) => ({
+          id: e.id,
+          createdAt: e.createdAt,
+          ...(e.claimEventId ? { claimEventId: e.claimEventId } : {}),
+        })),
+      );
+    });
+    await Promise.resolve();
+
+    const final = snapshots[snapshots.length - 1]!;
+    expect(final.length).toBe(2);
+    expect(final[0]!.id).toBe('p'.repeat(64));
+    expect(final[1]!.id).toBe('o'.repeat(64));
+    expect(final[0]!.createdAt).toBeLessThan(final[1]!.createdAt);
+    expect(final[1]!.claimEventId).toBe('q'.repeat(64));
+    unsub();
+  });
+
+  it('subscribeFulfillmentFor uses the right relay filter shape', () => {
+    const ownerPk = 'r'.repeat(64);
+    const target: AddressableRef = {
+      kind: 30402,
+      pubkey: ownerPk,
+      d: 'filter-test',
+    };
+    const unsub = subscribeFulfillmentFor(target).subscribe(() => {});
+    const sub = mockState.subs[mockState.subs.length - 1];
+    expect(sub).toBeTruthy();
+    expect(sub!.filter.kinds).toEqual([CLAIM_KIND]);
+    expect(sub!.filter['#a']).toEqual([`30402:${ownerPk}:filter-test`]);
+    expect(sub!.filter['#t']).toEqual([FULFILLED_TAG]);
     unsub();
   });
 });

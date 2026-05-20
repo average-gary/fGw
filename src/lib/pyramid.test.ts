@@ -15,6 +15,7 @@
  * header). We test against that real behavior.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { renderHook, waitFor, act, cleanup } from '@testing-library/react';
 
 // Happy-dom's localStorage is a no-op stub; the auth + chapter zustand
 // stores use the `persist` middleware, which crashes on `setState` without
@@ -49,6 +50,60 @@ vi.hoisted(() => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Mock `./ndk` so the kind-22242 subscription installed by
+// `useMembershipStatus` (via `ensureMembershipSubscription`) is exercisable
+// from tests. The hoisted `ndkSub` lets a test grab the captured event
+// callback and invoke it synthetically.
+// ---------------------------------------------------------------------------
+type NdkEventCb = () => void;
+const ndkSub = vi.hoisted(() => ({
+  onEventCallbacks: [] as NdkEventCb[],
+  reset(): void {
+    ndkSub.onEventCallbacks.length = 0;
+  },
+  fire(): void {
+    for (const cb of ndkSub.onEventCallbacks) cb();
+  },
+}));
+
+vi.mock('@/lib/ndk', () => ({
+  getNdk: () => ({
+    subscribe: (
+      _filter: { kinds: number[] },
+      handlers?: { onEvent?: NdkEventCb },
+    ) => {
+      if (handlers?.onEvent) ndkSub.onEventCallbacks.push(handlers.onEvent);
+      return {
+        on: (evt: string, cb: NdkEventCb): void => {
+          if (evt === 'event') ndkSub.onEventCallbacks.push(cb);
+        },
+      };
+    },
+  }),
+  currentRelay: () => 'wss://chat.virginiafreedom.tech',
+  setRelayToast: () => {},
+  addRelay: () => {},
+}));
+vi.mock('./ndk', () => ({
+  getNdk: () => ({
+    subscribe: (
+      _filter: { kinds: number[] },
+      handlers?: { onEvent?: NdkEventCb },
+    ) => {
+      if (handlers?.onEvent) ndkSub.onEventCallbacks.push(handlers.onEvent);
+      return {
+        on: (evt: string, cb: NdkEventCb): void => {
+          if (evt === 'event') ndkSub.onEventCallbacks.push(cb);
+        },
+      };
+    },
+  }),
+  currentRelay: () => 'wss://chat.virginiafreedom.tech',
+  setRelayToast: () => {},
+  addRelay: () => {},
+}));
+
 import { NDKPrivateKeySigner } from '@nostr-dev-kit/ndk';
 import * as nip19 from 'nostr-tools/nip19';
 import {
@@ -58,9 +113,11 @@ import {
   listMembers,
   parseMemberPage,
   relayHttpsBase,
+  useMembershipStatus,
+  usePublishGuard,
 } from './pyramid';
 import { useAuthStore } from './auth';
-import { useChapterStore } from './chapter';
+import { useChapterStore, setCurrentRelay } from './chapter';
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -95,6 +152,7 @@ const ORIG_FETCH = globalThis.fetch;
 
 beforeEach(() => {
   _resetPyramidForTests();
+  ndkSub.reset();
   useAuthStore.setState({
     method: null,
     signer: null,
@@ -106,6 +164,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  cleanup();
   globalThis.fetch = ORIG_FETCH;
   vi.restoreAllMocks();
 });
@@ -305,5 +364,172 @@ describe('inviteByNpub without a signer', () => {
     const res = await inviteByNpub(nip19.npubEncode(PK_TARGET));
     expect(res).toEqual({ ok: false, error: 'not-authed' });
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 8: useMembershipStatus — transitions from 'unknown' to 'allowed' once
+// `/allowed` returns the target pubkey.
+// ---------------------------------------------------------------------------
+
+describe('useMembershipStatus → allowed', () => {
+  it('starts at "unknown" then flips to "allowed" once /allowed lists the pubkey', async () => {
+    // /allowed returns PK_TARGET; /banned is empty.
+    const fetchSpy = vi.fn(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u.endsWith('/allowed')) {
+        return new Response(`<a href="/u/${PK_TARGET}">x</a>`, { status: 200 });
+      }
+      return new Response('', { status: 200 });
+    });
+    globalThis.fetch = fetchSpy as typeof fetch;
+
+    const { result } = renderHook(() => useMembershipStatus(PK_TARGET));
+    // Initial render: cache is empty, refresh kicked off in useEffect.
+    expect(result.current).toBe('unknown');
+
+    await waitFor(() => {
+      expect(result.current).toBe('allowed');
+    });
+
+    // Both endpoints were probed.
+    const calls = fetchSpy.mock.calls.map((c) => String(c[0]));
+    expect(calls).toContain('https://chat.virginiafreedom.tech/allowed');
+    expect(calls).toContain('https://chat.virginiafreedom.tech/banned');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 9: useMembershipStatus — chapter swap busts the cache and re-fetches
+// against the new https origin.
+// ---------------------------------------------------------------------------
+
+describe('useMembershipStatus → chapter swap', () => {
+  it('resets to "unknown" and re-fetches against the new chapter base URL', async () => {
+    // First chapter: /allowed lists PK_TARGET → 'allowed'.
+    // Second chapter: /allowed is empty → 'not-listed' (banned also empty).
+    const fetchSpy = vi.fn(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u.startsWith('https://chat.virginiafreedom.tech/allowed')) {
+        return new Response(`<a href="/u/${PK_TARGET}">x</a>`, { status: 200 });
+      }
+      // Any other base or /banned.
+      return new Response('', { status: 200 });
+    });
+    globalThis.fetch = fetchSpy as typeof fetch;
+
+    const { result } = renderHook(() => useMembershipStatus(PK_TARGET));
+    await waitFor(() => {
+      expect(result.current).toBe('allowed');
+    });
+
+    const callsBefore = fetchSpy.mock.calls.length;
+
+    // Swap the chapter relay. The pyramid module's chapter-store subscriber
+    // wipes the cache on change; the hook's useEffect then sees status
+    // 'unknown' + lastFetchedAt 0 and triggers another refresh against the
+    // new https base.
+    await act(async () => {
+      setCurrentRelay('wss://other.example');
+    });
+
+    // The cache reset is synchronous; status flips back to 'unknown' before
+    // the new fetch resolves.
+    await waitFor(() => {
+      expect(result.current).toBe('unknown');
+    });
+
+    // The new refresh fires, hits the *new* base, and (since /allowed is
+    // empty there) settles at 'not-listed' / 'unknown' (no listing).
+    await waitFor(() => {
+      expect(fetchSpy.mock.calls.length).toBeGreaterThan(callsBefore);
+    });
+    const newCalls = fetchSpy.mock.calls
+      .slice(callsBefore)
+      .map((c) => String(c[0]));
+    expect(newCalls).toContain('https://other.example/allowed');
+    expect(newCalls).toContain('https://other.example/banned');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 10: useMembershipStatus — synthetic kind-22242 event triggers a
+// re-fetch via the NDK subscription wired in `ensureMembershipSubscription`.
+// ---------------------------------------------------------------------------
+
+describe('useMembershipStatus → kind-22242 event', () => {
+  it('re-fetches /allowed + /banned when a kind-22242 event arrives', async () => {
+    const fetchSpy = vi.fn(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      if (u.endsWith('/allowed')) {
+        return new Response(`<a href="/u/${PK_TARGET}">x</a>`, { status: 200 });
+      }
+      return new Response('', { status: 200 });
+    });
+    globalThis.fetch = fetchSpy as typeof fetch;
+
+    const { result } = renderHook(() => useMembershipStatus(PK_TARGET));
+    await waitFor(() => {
+      expect(result.current).toBe('allowed');
+    });
+    const callsBefore = fetchSpy.mock.calls.length;
+    expect(ndkSub.onEventCallbacks.length).toBeGreaterThan(0);
+
+    // Simulate the relay pushing a kind-22242 membership-change event.
+    await act(async () => {
+      ndkSub.fire();
+    });
+
+    await waitFor(() => {
+      expect(fetchSpy.mock.calls.length).toBeGreaterThan(callsBefore);
+    });
+    const newCalls = fetchSpy.mock.calls
+      .slice(callsBefore)
+      .map((c) => String(c[0]));
+    expect(newCalls).toContain('https://chat.virginiafreedom.tech/allowed');
+    expect(newCalls).toContain('https://chat.virginiafreedom.tech/banned');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 11: usePublishGuard — pass-through on resolve.
+// ---------------------------------------------------------------------------
+
+describe('usePublishGuard → success path', () => {
+  it('returns the publish() result and leaves blocked=false', async () => {
+    const { result } = renderHook(() => usePublishGuard());
+    expect(result.current.blocked).toBe(false);
+
+    let value: number | null = null;
+    await act(async () => {
+      value = await result.current.guard(() => Promise.resolve(42));
+    });
+
+    expect(value).toBe(42);
+    expect(result.current.blocked).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 12: usePublishGuard — restricted rejection flips `blocked` and
+// returns null (so callers can render the "request invite" sheet).
+// ---------------------------------------------------------------------------
+
+describe('usePublishGuard → restricted rejection', () => {
+  it('flips blocked=true and returns null on a "restricted" reason', async () => {
+    const { result } = renderHook(() => usePublishGuard());
+    expect(result.current.blocked).toBe(false);
+
+    let value: unknown = 'sentinel';
+    await act(async () => {
+      value = await result.current.guard(() =>
+        Promise.reject(new Error('restricted: invite-only')),
+      );
+    });
+
+    expect(value).toBeNull();
+    await waitFor(() => {
+      expect(result.current.blocked).toBe(true);
+    });
   });
 });

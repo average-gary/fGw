@@ -9,12 +9,12 @@
  *   - sendDm()/subscribeDms() → inline DM sheet per claim (subcomponent)
  *   - postReview() → +1/-1/no-show review form (subcomponent)
  *
- * Fulfillment is local-only on first ship: the author taps "Mark fulfilled"
- * and the route flips a local React state flag, which unlocks the review
- * form. We do NOT yet publish a fulfillment marker event so the claimer's
- * review form will only appear once they tap their own "Mark fulfilled"
- * (TODO(SPEC-020.next): publish a kind-1 `t:fulfilled` reply or a NIP-25
- * reaction so participants on other clients see the same state).
+ * SPEC-032 — Fulfillment markers. The author's "Mark fulfilled" tap now
+ * publishes a structured kind-1 with `t:fulfilled` (see `fulfill()` in
+ * `lib/listings/claim`). All participants subscribe via
+ * `subscribeFulfillmentFor(ref)` and derive the unlock state from the
+ * relay-observed marker, so the claimer's review form opens automatically
+ * once the author's marker arrives — no second tap required.
  */
 import { useEffect, useMemo, useState } from 'react';
 import type { NDKEvent, NostrEvent } from '@nostr-dev-kit/ndk';
@@ -31,8 +31,11 @@ import { ReviewForm } from '@/components/listing/ReviewForm';
 import { useAuthStore } from '@/lib/auth';
 import {
   claim,
+  fulfill,
   subscribeClaimsFor,
+  subscribeFulfillmentFor,
   type Claim,
+  type FulfillmentEvent,
 } from '@/lib/listings/claim';
 import { parseListing } from '@/lib/listings/parse';
 import {
@@ -143,11 +146,18 @@ export function ListingDetail({ listingRef: ref, onBack }: ListingDetailProps) {
   const [showClaimMsg, setShowClaimMsg] = useState(false);
   const [claimDraft, setClaimDraft] = useState('');
   const [claiming, setClaiming] = useState(false);
-  // Local-only fulfillment flag. Persistence is intentionally out-of-scope
-  // for this first cut; see header comment.
-  const [fulfilled, setFulfilled] = useState(false);
+  // Optimistic local flag. The relay-observed marker is the source of
+  // truth (see `fulfillmentEvents` below); we keep `localFulfilled` so the
+  // author's UI flips instantly after they tap "Mark fulfilled" without
+  // waiting on the round-trip. Cleared on publish failure.
+  const [localFulfilled, setLocalFulfilled] = useState(false);
+  const [fulfillmentEvents, setFulfillmentEvents] = useState<
+    FulfillmentEvent[]
+  >([]);
+  const [marking, setMarking] = useState(false);
   const [dmTarget, setDmTarget] = useState<string | null>(null);
   const toast = useToast();
+  const fulfilled = localFulfilled || fulfillmentEvents.length > 0;
 
   useEffect(() => {
     if (!signer) {
@@ -174,6 +184,15 @@ export function ListingDetail({ listingRef: ref, onBack }: ListingDetailProps) {
     return sub;
   }, [ref.kind, ref.pubkey, ref.d]);
 
+  useEffect(() => {
+    setFulfillmentEvents([]);
+    setLocalFulfilled(false);
+    const sub = subscribeFulfillmentFor(ref).subscribe((next) => {
+      setFulfillmentEvents(next);
+    });
+    return sub;
+  }, [ref.kind, ref.pubkey, ref.d]);
+
   const isAuthor = !!mePubkey && mePubkey === ref.pubkey;
   const isClaimer =
     !!mePubkey && claims.some((c) => c.authorPubkey === mePubkey);
@@ -181,6 +200,32 @@ export function ListingDetail({ listingRef: ref, onBack }: ListingDetailProps) {
 
   const claimLabel =
     listing?.kind === 'need' ? "I'll do it" : "I'll take it";
+
+  const handleFulfill = async (): Promise<void> => {
+    if (marking) return;
+    setMarking(true);
+    // Optimistic flip so the UI doesn't appear stuck while the publish
+    // round-trips. Reset on failure.
+    setLocalFulfilled(true);
+    try {
+      // Pick the most recent claim authored by *me* if one exists, so the
+      // marker carries an `e` tag pointing at it. (As the listing author,
+      // there typically isn't one; this also covers the edge case of an
+      // author who self-claims.)
+      const myLatestClaimId = claims
+        .filter((c) => c.authorPubkey === mePubkey)
+        .sort((a, b) => b.createdAt - a.createdAt)[0]?.id;
+      await fulfill(ref, myLatestClaimId);
+    } catch (err) {
+      setLocalFulfilled(false);
+      toast.danger(
+        'Could not mark fulfilled',
+        err instanceof Error ? err.message : String(err),
+      );
+    } finally {
+      setMarking(false);
+    }
+  };
 
   const handleClaim = async (): Promise<void> => {
     if (claiming) return;
@@ -335,7 +380,11 @@ export function ListingDetail({ listingRef: ref, onBack }: ListingDetailProps) {
       {isAuthor && (
         <section>
           {!fulfilled ? (
-            <Button variant="secondary" onClick={() => setFulfilled(true)}>
+            <Button
+              variant="secondary"
+              onClick={handleFulfill}
+              loading={marking}
+            >
               Mark fulfilled
             </Button>
           ) : (

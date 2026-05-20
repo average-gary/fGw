@@ -44,7 +44,7 @@ export function DmThreadSheet({ open, onClose, me, other }: DmThreadSheetProps) 
         );
       });
     } catch {
-      /* unsupported signer for DMs — sheet still opens, send may fail */
+      /* no signer (logged out mid-render) — sheet still opens, send will surface the error */
     }
     return () => {
       active = false;
