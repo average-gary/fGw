@@ -1,28 +1,38 @@
 /**
- * SPEC-025 — Pyramid invite-only relay client + state hooks.
+ * SPEC-025 / SPEC-049 — Pyramid invite-only relay client + state hooks.
  *
- * Pyramid (`fiatjaf/pyramid`) is an invite-tree allowlist relay. It exposes
- * HTTP admin endpoints (`/allow`, `/ban`) gated by NIP-98 auth and HTML
- * read endpoints (`/allowed`, `/banned`, `/u/{pubkey}`) we screen-scrape.
+ * Pyramid (`fiatjaf/pyramid`) is an invite-tree allowlist relay. Its
+ * programmatic admin surface is **NIP-86**: a JSON-RPC envelope POSTed to
+ * the relay's HTTPS root, authenticated via a NIP-98 event in the
+ * `Authorization: Nostr <base64>` header. NIP-86 also requires a `payload`
+ * tag holding the hex sha256 of the request body (NIP-98 normally marks it
+ * optional; Pyramid enforces it). The legacy `/allow`, `/ban`, `/allowed`,
+ * `/banned` HTTP endpoints don't exist on `chat.virginiafreedom.tech`; this
+ * module talks NIP-86 instead.
+ *
+ * Read methods we use: `listallowedpubkeys`, `listbannedpubkeys`.
+ * Write methods we use: `allowpubkey`, `banpubkey`.
  *
  * This module provides:
  *   - `useMembershipStatus(pubkey)` — React hook backed by a zustand cache,
  *     refreshed on chapter swap and on kind-22242 membership-change events.
- *   - `inviteByNpub(npub)` / `dropMember(pubkey)` — NIP-98 authed POSTs.
- *   - `parseMemberPage(html)` — extracts inviter/invitee chains from
- *     `/u/{pubkey}`.
+ *   - `inviteByNpub(npub)` / `dropMember(pubkey)` — NIP-86 RPC calls.
+ *   - `parseMemberPage(html)` — extracts inviter/invitee chains from the
+ *     `/u/{pubkey}` HTML (still HTML-scraped; NIP-86 doesn't expose the
+ *     invite tree).
  *   - `usePublishGuard()` — wraps any publish call; on `restricted` /
  *     `auth-required` rejection it flips a `blocked` flag so callers can
  *     render the SPEC-026 "request invite" sheet.
  *
- * Selector contract: Pyramid renders members as `<a href="/u/<hex>">…</a>`.
- * We extract the 64-hex-char `<pubkey>` from those hrefs. If the template
- * ever drops the `/u/` prefix or hex-encodes pubkeys differently, all
- * parsers gracefully return empty arrays rather than throw.
+ * Selector contract for `parseMemberPage`: Pyramid renders members as
+ * `<a href="/u/<hex>">…</a>`. We extract the 64-hex-char `<pubkey>` from
+ * those hrefs. If the template ever drops the `/u/` prefix or hex-encodes
+ * pubkeys differently, parsers gracefully return empty arrays rather than
+ * throw.
  */
 import { useEffect } from 'react';
 import { create } from 'zustand';
-import NDK, { NDKEvent, type NDKSigner } from '@nostr-dev-kit/ndk';
+import { NDKEvent, type NDKSigner } from '@nostr-dev-kit/ndk';
 import * as nip19 from 'nostr-tools/nip19';
 import { useAuthStore } from './auth';
 import { useChapterStore } from './chapter';
@@ -127,16 +137,6 @@ function extractAllPubkeys(html: string): string[] {
   return out;
 }
 
-function pubkeysToMembers(pubkeys: string[]): Member[] {
-  return pubkeys.map((pubkey) => {
-    try {
-      return { pubkey, npub: nip19.npubEncode(pubkey) };
-    } catch {
-      return { pubkey };
-    }
-  });
-}
-
 /**
  * Parse `/u/{pubkey}` HTML into inviters and invitees.
  *
@@ -167,27 +167,140 @@ export function parseMemberPage(html: string): MemberInfo {
 }
 
 // ---------------------------------------------------------------------------
-// listMembers / listBanned
+// NIP-86 transport helper
 // ---------------------------------------------------------------------------
 
 function currentBase(): string {
   return relayHttpsBase(useChapterStore.getState().currentRelay);
 }
 
-async function fetchAndExtract(url: string): Promise<Member[]> {
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) return [];
-    const html = await resp.text();
-    return pubkeysToMembers(extractAllPubkeys(html));
-  } catch {
-    return [];
+function b64encode(s: string): string {
+  // btoa requires Latin-1; encode UTF-8 bytes first.
+  const bytes = new TextEncoder().encode(s);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i] ?? 0);
+  return btoa(bin);
+}
+
+async function sha256Hex(buf: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  const bytes = new Uint8Array(digest);
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) {
+    s += (bytes[i] ?? 0).toString(16).padStart(2, '0');
   }
+  return s;
+}
+
+/**
+ * NIP-86 RPC call: POST `{method, params}` to the relay's HTTPS root, signed
+ * with a NIP-98 kind-27235 event whose `payload` tag is the hex sha256 of
+ * the request body. Throws on transport failure, 401, non-2xx HTTP, or a
+ * 200-with-error envelope.
+ *
+ * The signer is read from `useAuthStore`. Callers (`listMembers`, etc.) are
+ * responsible for catching and mapping errors to their typed result unions.
+ */
+async function nip86Call<T = unknown>(
+  signer: NDKSigner,
+  method: string,
+  params: unknown[],
+): Promise<T> {
+  const httpUrl = currentBase();
+  const body = JSON.stringify({ method, params });
+  const bodyBytes = new TextEncoder().encode(body);
+  // Slice to a fresh ArrayBuffer to avoid SharedArrayBuffer typing surprises.
+  const payloadHash = await sha256Hex(
+    bodyBytes.buffer.slice(
+      bodyBytes.byteOffset,
+      bodyBytes.byteOffset + bodyBytes.byteLength,
+    ),
+  );
+
+  const auth = new NDKEvent(getNdk());
+  auth.kind = 27235;
+  auth.created_at = Math.floor(Date.now() / 1000);
+  auth.content = '';
+  auth.tags = [
+    ['u', httpUrl],
+    ['method', 'POST'],
+    ['payload', payloadHash],
+  ];
+  await auth.sign(signer);
+
+  const token = b64encode(JSON.stringify(auth.rawEvent()));
+  let res: Response;
+  try {
+    res = await fetch(httpUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/nostr+json+rpc',
+        Authorization: `Nostr ${token}`,
+      },
+      body,
+    });
+  } catch (err) {
+    // Re-throw as a TypeError-shaped error so callers can detect "network".
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+  if (res.status === 401) throw new Error('NIP-86: unauthorized');
+  if (!res.ok) throw new Error(`NIP-86 ${method}: HTTP ${res.status}`);
+  let json: { result?: T; error?: string };
+  try {
+    json = (await res.json()) as { result?: T; error?: string };
+  } catch {
+    throw new Error(`NIP-86 ${method}: invalid JSON response`);
+  }
+  if (json.error) throw new Error(`NIP-86 ${method}: ${json.error}`);
+  return json.result as T;
+}
+
+// ---------------------------------------------------------------------------
+// listMembers / listBanned
+// ---------------------------------------------------------------------------
+
+interface PubkeyEntry {
+  pubkey: string;
+  reason?: string;
+}
+
+function entriesToMembers(entries: unknown): Member[] {
+  if (!Array.isArray(entries)) return [];
+  const out: Member[] = [];
+  const seen = new Set<string>();
+  for (const raw of entries) {
+    if (!raw || typeof raw !== 'object') continue;
+    const pkRaw = (raw as { pubkey?: unknown }).pubkey;
+    if (typeof pkRaw !== 'string') continue;
+    const pk = pkRaw.toLowerCase();
+    if (!HEX64.test(pk) || seen.has(pk)) continue;
+    seen.add(pk);
+    try {
+      out.push({ pubkey: pk, npub: nip19.npubEncode(pk) });
+    } catch {
+      out.push({ pubkey: pk });
+    }
+  }
+  return out;
 }
 
 export async function listMembers(): Promise<Member[]> {
-  const base = currentBase();
-  const members = await fetchAndExtract(`${base}/allowed`);
+  const signer = useAuthStore.getState().signer;
+  if (!signer) {
+    // Pyramid's read methods still require auth; degrade gracefully (mirrors
+    // the previous fetch-and-swallow semantics so membership hooks don't
+    // crash when the user is signed out).
+    usePyramidStore.setState({ members: [], lastFetchedAt: Date.now() });
+    return [];
+  }
+  let entries: PubkeyEntry[];
+  try {
+    entries = await nip86Call<PubkeyEntry[]>(signer, 'listallowedpubkeys', []);
+  } catch {
+    usePyramidStore.setState({ members: [], lastFetchedAt: Date.now() });
+    return [];
+  }
+  const members = entriesToMembers(entries);
   usePyramidStore.setState({ members, lastFetchedAt: Date.now() });
   // Mirror into per-pubkey status cache.
   const patch: Record<string, MembershipStatus> = {};
@@ -199,8 +312,19 @@ export async function listMembers(): Promise<Member[]> {
 }
 
 export async function listBanned(): Promise<Member[]> {
-  const base = currentBase();
-  const banned = await fetchAndExtract(`${base}/banned`);
+  const signer = useAuthStore.getState().signer;
+  if (!signer) {
+    usePyramidStore.setState({ banned: [] });
+    return [];
+  }
+  let entries: PubkeyEntry[];
+  try {
+    entries = await nip86Call<PubkeyEntry[]>(signer, 'listbannedpubkeys', []);
+  } catch {
+    usePyramidStore.setState({ banned: [] });
+    return [];
+  }
+  const banned = entriesToMembers(entries);
   usePyramidStore.setState({ banned });
   const patch: Record<string, MembershipStatus> = {};
   for (const m of banned) patch[m.pubkey] = 'banned';
@@ -211,42 +335,36 @@ export async function listBanned(): Promise<Member[]> {
 }
 
 // ---------------------------------------------------------------------------
-// NIP-98 auth header
-// ---------------------------------------------------------------------------
-
-function b64encode(s: string): string {
-  const bytes = new TextEncoder().encode(s);
-  let bin = '';
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i] ?? 0);
-  return btoa(bin);
-}
-
-async function nip98Header(
-  signer: NDKSigner,
-  url: string,
-  method: 'GET' | 'POST',
-): Promise<string> {
-  const ev = new NDKEvent(new NDK());
-  ev.kind = 27235;
-  ev.created_at = Math.floor(Date.now() / 1000);
-  ev.content = '';
-  ev.tags = [
-    ['u', url],
-    ['method', method],
-  ];
-  await ev.sign(signer);
-  return `Nostr ${b64encode(JSON.stringify(ev.rawEvent()))}`;
-}
-
-// ---------------------------------------------------------------------------
 // inviteByNpub / dropMember
 // ---------------------------------------------------------------------------
 
-function classifyInviteBody(body: string): InviteError {
-  const b = body.toLowerCase();
-  if (b.includes('quota') || b.includes('too many')) return 'over-quota';
-  if (b.includes('cycle') || b.includes('loop')) return 'cycle';
-  if (b.includes('already')) return 'already-member';
+/**
+ * Map a thrown error from `nip86Call` to an `InviteError`. The matchers are
+ * substring-based against the error message because Pyramid surfaces
+ * free-form reasons in the NIP-86 `error` field (and we wrap HTTP
+ * non-success codes into `NIP-86 <method>: HTTP <n>`).
+ */
+function classifyInviteError(err: unknown): InviteError {
+  if (err instanceof TypeError) return 'network';
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  if (msg === 'NIP-86: unauthorized') return 'not-authed';
+  const lower = msg.toLowerCase();
+  if (lower.includes('quota') || lower.includes('too many')) return 'over-quota';
+  if (lower.includes('cycle') || lower.includes('loop')) return 'cycle';
+  if (lower.includes('already')) return 'already-member';
+  if (/^nip-86 allowpubkey: http 5\d\d/i.test(msg)) return 'network';
+  return 'forbidden';
+}
+
+function classifyDropError(err: unknown): DropError {
+  if (err instanceof TypeError) return 'network';
+  const msg = err instanceof Error ? err.message : String(err ?? '');
+  if (msg === 'NIP-86: unauthorized') return 'not-authed';
+  const lower = msg.toLowerCase();
+  if (lower.includes('not found') || lower.includes('unknown pubkey')) {
+    return 'not-found';
+  }
+  if (/^nip-86 banpubkey: http 5\d\d/i.test(msg)) return 'network';
   return 'forbidden';
 }
 
@@ -267,47 +385,26 @@ export async function inviteByNpub(
     return { ok: false, error: 'forbidden' };
   }
 
-  const url = `${currentBase()}/allow?type=invite&target=${hex}`;
-  let auth: string;
+  let result: unknown;
   try {
-    auth = await nip98Header(signer, url, 'POST');
-  } catch {
-    return { ok: false, error: 'not-authed' };
+    result = await nip86Call<unknown>(signer, 'allowpubkey', [hex]);
+  } catch (err) {
+    return { ok: false, error: classifyInviteError(err) };
+  }
+  if (result !== true) {
+    return { ok: false, error: 'forbidden' };
   }
 
-  let resp: Response;
+  usePyramidStore.getState()._setStatus(hex, 'allowed');
+  let npubEnc: string | undefined;
   try {
-    resp = await fetch(url, { method: 'POST', headers: { Authorization: auth } });
+    npubEnc = nip19.npubEncode(hex);
   } catch {
-    return { ok: false, error: 'network' };
+    /* ignore */
   }
-
-  if (resp.ok) {
-    usePyramidStore.getState()._setStatus(hex, 'allowed');
-    let npubEnc: string | undefined;
-    try {
-      npubEnc = nip19.npubEncode(hex);
-    } catch {
-      /* ignore */
-    }
-    const member: Member = npubEnc ? { pubkey: hex, npub: npubEnc } : { pubkey: hex };
-    usePyramidStore.getState()._appendMember(member);
-    return { ok: true, value: undefined };
-  }
-
-  if (resp.status === 401) return { ok: false, error: 'not-authed' };
-  if (resp.status === 403) return { ok: false, error: 'forbidden' };
-  if (resp.status === 422) {
-    let body = '';
-    try {
-      body = await resp.text();
-    } catch {
-      /* ignore */
-    }
-    return { ok: false, error: classifyInviteBody(body) };
-  }
-  if (resp.status >= 500) return { ok: false, error: 'network' };
-  return { ok: false, error: 'forbidden' };
+  const member: Member = npubEnc ? { pubkey: hex, npub: npubEnc } : { pubkey: hex };
+  usePyramidStore.getState()._appendMember(member);
+  return { ok: true, value: undefined };
 }
 
 export async function dropMember(
@@ -317,32 +414,22 @@ export async function dropMember(
   if (!signer) return { ok: false, error: 'not-authed' };
   if (!HEX64.test(pubkey)) return { ok: false, error: 'not-found' };
 
-  const url = `${currentBase()}/ban?type=drop&target=${pubkey.toLowerCase()}`;
-  let auth: string;
+  const hex = pubkey.toLowerCase();
+  let result: unknown;
   try {
-    auth = await nip98Header(signer, url, 'POST');
-  } catch {
-    return { ok: false, error: 'not-authed' };
+    result = await nip86Call<unknown>(signer, 'banpubkey', [hex]);
+  } catch (err) {
+    return { ok: false, error: classifyDropError(err) };
+  }
+  if (result !== true) {
+    return { ok: false, error: 'forbidden' };
   }
 
-  let resp: Response;
-  try {
-    resp = await fetch(url, { method: 'POST', headers: { Authorization: auth } });
-  } catch {
-    return { ok: false, error: 'network' };
-  }
-
-  if (resp.ok) {
-    usePyramidStore.getState()._setStatus(pubkey.toLowerCase(), 'banned');
-    usePyramidStore.setState((s) => ({
-      members: s.members.filter((m) => m.pubkey !== pubkey.toLowerCase()),
-    }));
-    return { ok: true, value: undefined };
-  }
-  if (resp.status === 401) return { ok: false, error: 'not-authed' };
-  if (resp.status === 404) return { ok: false, error: 'not-found' };
-  if (resp.status >= 500) return { ok: false, error: 'network' };
-  return { ok: false, error: 'forbidden' };
+  usePyramidStore.getState()._setStatus(hex, 'banned');
+  usePyramidStore.setState((s) => ({
+    members: s.members.filter((m) => m.pubkey !== hex),
+  }));
+  return { ok: true, value: undefined };
 }
 
 // ---------------------------------------------------------------------------
