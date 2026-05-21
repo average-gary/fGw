@@ -14,7 +14,7 @@
  * lazy-loaded since it's only useful during visual debugging. Suspense
  * fallback is the standard `<Spinner/>`.
  */
-import { lazy, Suspense, useRef, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useRef, type ReactNode } from 'react';
 import {
   HashRouter,
   MemoryRouter,
@@ -29,6 +29,7 @@ import { ToastProvider } from '@/components/ui/Toast';
 import { Spinner } from '@/components/ui/Spinner';
 import { AppShell } from '@/components/AppShell';
 import { useOnboarding } from '@/lib/onboarding';
+import { startMembershipPoller, stopMembershipPoller } from '@/lib/pyramid';
 import { Onboarding } from '@/routes/Onboarding';
 import { Feed } from '@/routes/Feed';
 import { Calendar } from '@/routes/Calendar';
@@ -242,6 +243,15 @@ function RequestInviteRoute(): ReactNode {
 // ---------------------------------------------------------------------------
 export function AppRoutes(): ReactNode {
   const completedAt = useOnboarding().completedAt;
+  // SPEC-050: start the Pyramid membership poller once the user has
+  // completed onboarding (no point polling before a chapter relay is
+  // configured). `startMembershipPoller` is idempotent; the cleanup stops
+  // it on unmount so tests don't leak timers across files.
+  useEffect(() => {
+    if (completedAt === null) return;
+    startMembershipPoller();
+    return () => stopMembershipPoller();
+  }, [completedAt]);
   if (completedAt === null) {
     return <Onboarding />;
   }

@@ -1,5 +1,6 @@
 /**
- * SPEC-025 / SPEC-049 — Pyramid invite-only relay client + state hooks.
+ * SPEC-025 / SPEC-049 / SPEC-050 — Pyramid invite-only relay client + state
+ * hooks.
  *
  * Pyramid (`fiatjaf/pyramid`) is an invite-tree allowlist relay. Its
  * programmatic admin surface is **NIP-86**: a JSON-RPC envelope POSTed to
@@ -15,7 +16,11 @@
  *
  * This module provides:
  *   - `useMembershipStatus(pubkey)` — React hook backed by a zustand cache,
- *     refreshed on chapter swap and on kind-22242 membership-change events.
+ *     refreshed on chapter swap and via the deterministic
+ *     `MembershipPoller` (SPEC-050).
+ *   - `startMembershipPoller()` / `stopMembershipPoller()` — wire-on-boot
+ *     polling triggers (every 5 min foreground, on visibility-change, and
+ *     on chapter relay change). Idempotent.
  *   - `inviteByNpub(npub)` / `dropMember(pubkey)` — NIP-86 RPC calls.
  *   - `parseMemberPage(html)` — extracts inviter/invitee chains from the
  *     `/u/{pubkey}` HTML (still HTML-scraped; NIP-86 doesn't expose the
@@ -452,43 +457,98 @@ async function refreshMembership(): Promise<void> {
 }
 
 /**
- * Subscribe to kind-22242 membership-change events on the current relay
- * and refresh the cache whenever one arrives. Pyramid does not currently
- * emit kind-22242 from `chat.virginiafreedom.tech`; the listener is wired
- * defensively so a future server-side push would Just Work.
+ * SPEC-050 — Deterministic membership polling.
  *
- * TODO: confirm Pyramid's emit semantics once the upstream PR lands.
+ * Replaces the (defensive but never-firing) NDK subscription removed with
+ * this spec. Pyramid never broadcasts membership-change events to
+ * subscribers (NIP-42 reserves the only kind that carried that meaning for
+ * client→relay AUTH challenge responses), so we poll on a deterministic
+ * schedule instead.
+ *
+ * Triggers:
+ *   1. boot: immediate fetch when `start()` is called.
+ *   2. foreground: every 5 minutes via `setInterval`. The interval
+ *      callback skips when the document is backgrounded so we don't burn
+ *      battery off-screen.
+ *   3. visibility-change: when the tab/app comes back to the foreground,
+ *      fire an immediate fetch.
+ *   4. chapter-store change: when `currentRelay` flips, fire an immediate
+ *      fetch (the existing module-level subscriber wipes the cache; this
+ *      poller subscriber re-fills it).
+ *
+ * Idempotent: calling `start()` twice is a no-op. `stop()` is provided for
+ * symmetry (used in tests; useful for future logout flows).
  */
-let membershipSubInstalled = false;
-function ensureMembershipSubscription(): void {
-  if (membershipSubInstalled) return;
-  membershipSubInstalled = true;
-  try {
-    const ndk = getNdk() as unknown as {
-      subscribe?: (
-        filter: { kinds: number[] },
-        handlers?: { onEvent?: () => void },
-      ) => { on?: (evt: 'event', cb: () => void) => void } | undefined;
-    };
-    if (typeof ndk.subscribe !== 'function') return;
-    const sub = ndk.subscribe(
-      { kinds: [22242] },
-      {
-        onEvent: () => {
-          usePyramidStore.setState({ lastFetchedAt: 0 });
-          void refreshMembership();
-        },
-      },
-    );
-    if (sub && typeof sub.on === 'function') {
-      sub.on('event', () => {
-        usePyramidStore.setState({ lastFetchedAt: 0 });
+const POLL_INTERVAL_MS = 5 * 60 * 1000;
+
+class MembershipPoller {
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private chapterUnsubscribe: (() => void) | null = null;
+  private started = false;
+
+  start(): void {
+    if (this.started) return;
+    this.started = true;
+
+    // Immediate fetch on boot.
+    void refreshMembership();
+
+    // Foreground cadence — skip when backgrounded.
+    this.timer = setInterval(() => {
+      if (
+        typeof document === 'undefined' ||
+        document.visibilityState === 'visible'
+      ) {
         void refreshMembership();
-      });
+      }
+    }, POLL_INTERVAL_MS);
+
+    // Visibility change (foreground return).
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.onVisibility);
     }
-  } catch {
-    /* swallow — module-load must not throw */
+
+    // Chapter relay change. The module-level subscriber above wipes the
+    // cache on change; this one re-fills it with a fresh fetch.
+    this.chapterUnsubscribe = useChapterStore.subscribe((state, prev) => {
+      if (state.currentRelay !== prev.currentRelay) {
+        void refreshMembership();
+      }
+    });
   }
+
+  stop(): void {
+    if (!this.started) return;
+    this.started = false;
+    if (this.timer !== null) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.onVisibility);
+    }
+    this.chapterUnsubscribe?.();
+    this.chapterUnsubscribe = null;
+  }
+
+  private onVisibility = (): void => {
+    if (typeof document === 'undefined') return;
+    if (document.visibilityState === 'visible') {
+      void refreshMembership();
+    }
+  };
+}
+
+const membershipPoller = new MembershipPoller();
+
+/** Start the membership poller. Idempotent — safe to call from any boot path. */
+export function startMembershipPoller(): void {
+  membershipPoller.start();
+}
+
+/** Stop the membership poller. Idempotent. */
+export function stopMembershipPoller(): void {
+  membershipPoller.stop();
 }
 
 export function useMembershipStatus(pubkey: string): MembershipStatus {
@@ -498,7 +558,6 @@ export function useMembershipStatus(pubkey: string): MembershipStatus {
   const lastFetchedAt = usePyramidStore((s) => s.lastFetchedAt);
 
   useEffect(() => {
-    ensureMembershipSubscription();
     if (!pubkey) return;
     if (status !== 'unknown') return;
     if (Date.now() - lastFetchedAt < STALE_MS) return;
@@ -558,6 +617,6 @@ export function _resetPyramidForTests(): void {
     lastFetchedAt: 0,
   });
   useGuardStore.setState({ blocked: false });
-  membershipSubInstalled = false;
+  membershipPoller.stop();
   inflightRefresh = null;
 }

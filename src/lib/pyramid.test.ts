@@ -51,34 +51,22 @@ vi.hoisted(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Mock `./ndk` so the kind-22242 subscription installed by
-// `useMembershipStatus` (via `ensureMembershipSubscription`) is exercisable
-// from tests. The hoisted `ndkSub` lets a test grab the captured event
-// callback and invoke it synthetically.
+// Mock `./ndk`. `nip86Call` instantiates `new NDKEvent(getNdk())`, so we need
+// `getNdk()` to return a usable shape; the `ndkFilters` array also lets
+// Test 20 confirm SPEC-050 removed all kind-22242 subscription calls.
 // ---------------------------------------------------------------------------
-type NdkEventCb = () => void;
-const ndkSub = vi.hoisted(() => ({
-  onEventCallbacks: [] as NdkEventCb[],
+const ndkFilters = vi.hoisted(() => ({
+  filters: [] as Array<{ kinds?: number[] } | undefined>,
   reset(): void {
-    ndkSub.onEventCallbacks.length = 0;
-  },
-  fire(): void {
-    for (const cb of ndkSub.onEventCallbacks) cb();
+    ndkFilters.filters.length = 0;
   },
 }));
 
 vi.mock('@/lib/ndk', () => ({
   getNdk: () => ({
-    subscribe: (
-      _filter: { kinds: number[] },
-      handlers?: { onEvent?: NdkEventCb },
-    ) => {
-      if (handlers?.onEvent) ndkSub.onEventCallbacks.push(handlers.onEvent);
-      return {
-        on: (evt: string, cb: NdkEventCb): void => {
-          if (evt === 'event') ndkSub.onEventCallbacks.push(cb);
-        },
-      };
+    subscribe: (filter: { kinds?: number[] } | undefined) => {
+      ndkFilters.filters.push(filter);
+      return { on: () => {} };
     },
   }),
   currentRelay: () => 'wss://chat.virginiafreedom.tech',
@@ -87,16 +75,9 @@ vi.mock('@/lib/ndk', () => ({
 }));
 vi.mock('./ndk', () => ({
   getNdk: () => ({
-    subscribe: (
-      _filter: { kinds: number[] },
-      handlers?: { onEvent?: NdkEventCb },
-    ) => {
-      if (handlers?.onEvent) ndkSub.onEventCallbacks.push(handlers.onEvent);
-      return {
-        on: (evt: string, cb: NdkEventCb): void => {
-          if (evt === 'event') ndkSub.onEventCallbacks.push(cb);
-        },
-      };
+    subscribe: (filter: { kinds?: number[] } | undefined) => {
+      ndkFilters.filters.push(filter);
+      return { on: () => {} };
     },
   }),
   currentRelay: () => 'wss://chat.virginiafreedom.tech',
@@ -113,6 +94,8 @@ import {
   listMembers,
   parseMemberPage,
   relayHttpsBase,
+  startMembershipPoller,
+  stopMembershipPoller,
   useMembershipStatus,
   usePublishGuard,
 } from './pyramid';
@@ -152,7 +135,7 @@ const ORIG_FETCH = globalThis.fetch;
 
 beforeEach(() => {
   _resetPyramidForTests();
-  ndkSub.reset();
+  ndkFilters.reset();
   useAuthStore.setState({
     method: null,
     signer: null,
@@ -562,66 +545,10 @@ describe('useMembershipStatus → chapter swap', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 10: useMembershipStatus — synthetic kind-22242 event triggers a
-// re-fetch via the NDK subscription wired in `ensureMembershipSubscription`.
+// Test 10 (SPEC-050): the kind-22242 subscription that previously lived in
+// `ensureMembershipSubscription` was deleted. The poller below covers the
+// re-fetch behaviour deterministically.
 // ---------------------------------------------------------------------------
-
-describe('useMembershipStatus → kind-22242 event', () => {
-  it('re-fetches NIP-86 list methods when a kind-22242 event arrives', async () => {
-    const signer = NDKPrivateKeySigner.generate();
-    useAuthStore.setState({
-      method: 'nsec-local',
-      signer,
-      npub: (await signer.user()).npub,
-      status: 'ready',
-    });
-
-    const fetchSpy = vi.fn(
-      async (_url: RequestInfo | URL, init?: RequestInit) => {
-        const bodyStr = typeof init?.body === 'string' ? init.body : '';
-        const env = bodyStr ? JSON.parse(bodyStr) : { method: '' };
-        if (env.method === 'listallowedpubkeys') {
-          return new Response(
-            JSON.stringify({ result: [{ pubkey: PK_TARGET }] }),
-            { status: 200, headers: { 'content-type': 'application/json' } },
-          );
-        }
-        return new Response(JSON.stringify({ result: [] }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        });
-      },
-    );
-    globalThis.fetch = fetchSpy as typeof fetch;
-
-    const { result } = renderHook(() => useMembershipStatus(PK_TARGET));
-    await waitFor(() => {
-      expect(result.current).toBe('allowed');
-    });
-    const callsBefore = fetchSpy.mock.calls.length;
-    expect(ndkSub.onEventCallbacks.length).toBeGreaterThan(0);
-
-    // Simulate the relay pushing a kind-22242 membership-change event.
-    await act(async () => {
-      ndkSub.fire();
-    });
-
-    await waitFor(() => {
-      expect(fetchSpy.mock.calls.length).toBeGreaterThan(callsBefore);
-    });
-    const newMethods = fetchSpy.mock.calls.slice(callsBefore).map((c) => {
-      const init = c[1] as RequestInit | undefined;
-      const body = typeof init?.body === 'string' ? init.body : '';
-      try {
-        return JSON.parse(body).method;
-      } catch {
-        return null;
-      }
-    });
-    expect(newMethods).toContain('listallowedpubkeys');
-    expect(newMethods).toContain('listbannedpubkeys');
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Test 11: usePublishGuard — pass-through on resolve.
@@ -786,5 +713,248 @@ describe('NIP-86 200-with-error maps to InviteError', () => {
 
     const res = await inviteByNpub(nip19.npubEncode(PK_TARGET));
     expect(res).toEqual({ ok: false, error: 'cycle' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SPEC-050 — MembershipPoller tests.
+//
+// These tests exercise the deterministic polling that replaces the deleted
+// kind-22242 NDK subscription. Each test that calls `startMembershipPoller`
+// also calls `stopMembershipPoller` in cleanup (or relies on
+// `_resetPyramidForTests`, which now stops the poller) so timers don't leak
+// across files.
+// ---------------------------------------------------------------------------
+
+/** Build a fetch spy that returns empty NIP-86 list results for both methods. */
+function emptyNip86FetchSpy(): ReturnType<typeof vi.fn> {
+  return vi.fn(async () =>
+    new Response(JSON.stringify({ result: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  );
+}
+
+/** Build a signer + auth-store entry usable by `nip86Call`. */
+async function installSigner(): Promise<void> {
+  const signer = NDKPrivateKeySigner.generate();
+  useAuthStore.setState({
+    method: 'nsec-local',
+    signer,
+    npub: (await signer.user()).npub,
+    status: 'ready',
+  });
+}
+
+/** Pull the JSON-RPC `method` field out of every recorded fetch call. */
+function recordedMethods(
+  spy: ReturnType<typeof vi.fn>,
+): Array<string | null> {
+  return spy.mock.calls.map((c) => {
+    const init = c[1] as RequestInit | undefined;
+    const body = typeof init?.body === 'string' ? init.body : '';
+    try {
+      return (JSON.parse(body) as { method?: string }).method ?? null;
+    } catch {
+      return null;
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Test 16 (SPEC-050): startMembershipPoller fires an immediate fetch.
+// ---------------------------------------------------------------------------
+
+describe('startMembershipPoller → immediate fetch on boot', () => {
+  it('calls listallowedpubkeys + listbannedpubkeys exactly once on first start', async () => {
+    await installSigner();
+    const fetchSpy = emptyNip86FetchSpy();
+    globalThis.fetch = fetchSpy as typeof fetch;
+
+    try {
+      startMembershipPoller();
+      await waitFor(() => {
+        const methods = recordedMethods(fetchSpy);
+        expect(methods).toContain('listallowedpubkeys');
+        expect(methods).toContain('listbannedpubkeys');
+      });
+    } finally {
+      stopMembershipPoller();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 17 (SPEC-050): the foreground 5-minute setInterval cadence.
+// ---------------------------------------------------------------------------
+
+describe('MembershipPoller setInterval cadence', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    stopMembershipPoller();
+    vi.useRealTimers();
+  });
+
+  it('refreshes every 5 minutes while the document is visible', async () => {
+    await installSigner();
+    const fetchSpy = emptyNip86FetchSpy();
+    globalThis.fetch = fetchSpy as typeof fetch;
+
+    // Default happy-dom visibilityState is 'visible'; pin it so the
+    // interval-callback gate evaluates to true.
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'visible',
+      configurable: true,
+    });
+
+    startMembershipPoller();
+    // Immediate boot fetch.
+    await vi.advanceTimersByTimeAsync(0);
+    const callsAfterBoot = fetchSpy.mock.calls.length;
+    expect(callsAfterBoot).toBeGreaterThan(0);
+
+    // Advance 5 minutes — the interval should fire one refresh.
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(fetchSpy.mock.calls.length).toBeGreaterThan(callsAfterBoot);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 18 (SPEC-050): visibility-change → immediate refresh.
+// ---------------------------------------------------------------------------
+
+describe('MembershipPoller visibility-change trigger', () => {
+  it('fires a fresh fetch when visibilityState flips to visible', async () => {
+    await installSigner();
+    const fetchSpy = emptyNip86FetchSpy();
+    globalThis.fetch = fetchSpy as typeof fetch;
+
+    try {
+      startMembershipPoller();
+      await waitFor(() => {
+        expect(fetchSpy.mock.calls.length).toBeGreaterThan(0);
+      });
+      const callsBefore = fetchSpy.mock.calls.length;
+
+      Object.defineProperty(document, 'visibilityState', {
+        value: 'visible',
+        configurable: true,
+      });
+      document.dispatchEvent(new Event('visibilitychange'));
+
+      await waitFor(() => {
+        expect(fetchSpy.mock.calls.length).toBeGreaterThan(callsBefore);
+      });
+    } finally {
+      stopMembershipPoller();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 19 (SPEC-050): chapter-store change → immediate refresh against the
+// new HTTPS base URL.
+// ---------------------------------------------------------------------------
+
+describe('MembershipPoller chapter-store trigger', () => {
+  it('refreshes against the new https origin when currentRelay changes', async () => {
+    await installSigner();
+    const fetchSpy = emptyNip86FetchSpy();
+    globalThis.fetch = fetchSpy as typeof fetch;
+
+    try {
+      startMembershipPoller();
+      await waitFor(() => {
+        expect(fetchSpy.mock.calls.length).toBeGreaterThan(0);
+      });
+      const callsBefore = fetchSpy.mock.calls.length;
+
+      await act(async () => {
+        setCurrentRelay('wss://other.example');
+      });
+
+      await waitFor(() => {
+        expect(fetchSpy.mock.calls.length).toBeGreaterThan(callsBefore);
+      });
+      // The new fetch hits the new base.
+      const newUrls = fetchSpy.mock.calls
+        .slice(callsBefore)
+        .map((c) => String(c[0]));
+      expect(newUrls).toContain('https://other.example');
+    } finally {
+      stopMembershipPoller();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 20 (SPEC-050): kind-22242 NDK subscription is gone.
+//
+// Asserts that no code path in pyramid.ts subscribes via NDK with a filter
+// containing `kinds: [22242]`. The hoisted `ndkFilters` array captures the
+// `_filter` arg of every `subscribe` call made through the mocked `getNdk`.
+// ---------------------------------------------------------------------------
+
+describe('SPEC-050 — kind-22242 NDK subscription removed', () => {
+  it('no NDK.subscribe call from pyramid.ts uses kinds: [22242]', async () => {
+    await installSigner();
+    const fetchSpy = emptyNip86FetchSpy();
+    globalThis.fetch = fetchSpy as typeof fetch;
+
+    try {
+      startMembershipPoller();
+      const { unmount } = renderHook(() => useMembershipStatus(PK_TARGET));
+      await waitFor(() => {
+        expect(fetchSpy.mock.calls.length).toBeGreaterThan(0);
+      });
+      unmount();
+      // Every captured filter must be free of the 22242 kind.
+      for (const f of ndkFilters.filters) {
+        expect(f?.kinds ?? []).not.toContain(22242);
+      }
+    } finally {
+      stopMembershipPoller();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 21 (SPEC-050): stopMembershipPoller is idempotent and clears the
+// interval. After stop, advancing time by 5 minutes triggers no refresh.
+// ---------------------------------------------------------------------------
+
+describe('stopMembershipPoller idempotence', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('clears the interval and is safe to call twice', async () => {
+    await installSigner();
+    const fetchSpy = emptyNip86FetchSpy();
+    globalThis.fetch = fetchSpy as typeof fetch;
+
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'visible',
+      configurable: true,
+    });
+
+    startMembershipPoller();
+    await vi.advanceTimersByTimeAsync(0);
+    const callsAfterBoot = fetchSpy.mock.calls.length;
+    expect(callsAfterBoot).toBeGreaterThan(0);
+
+    stopMembershipPoller();
+    // Calling stop twice must not throw.
+    expect(() => stopMembershipPoller()).not.toThrow();
+
+    // No further fetches after a 5-minute window.
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(fetchSpy.mock.calls.length).toBe(callsAfterBoot);
   });
 });
