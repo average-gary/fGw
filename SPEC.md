@@ -90,7 +90,7 @@ export const MULCH = { thickness_cm: 2.5, coverage: 1.0 } as const;         // G
 - `scaledIngredients(d: Dimensions): { manure_50kg_bags, green_m3, woody_m3, dry_m3, water_litres }` — scales the reference 2×2×2 → 8 m³ totals (15 manure bags / 8 m³ green / 4 m³ woody / 4 m³ dry / ~400 L water across 8 layers) by `volumeM3(d) / volumeM3(PILE_REFERENCE_DIMENSIONS)`.
 - `staffingEstimate(d: Dimensions, task: 'build' | 'turn'): { min_volunteers: number; est_hours: number }` — heuristic: `build` ≈ 1 person per 2 m³, ≥ 2 hr; `turn` ≈ 1 person per 4 m³, ≥ 1.5 hr.
 
-Constants are sacred — validators refuse pile records that violate them; UI pre-fills defaults; education content cites them.
+Constants are sacred — validators refuse pile records that violate them; UI pre-fills defaults; education content cites them. These constants are practitioner-codified from Brian Oldreive's Hinton Estate experience and captured in the Field Guide; they are not independently peer-validated, but represent tested tradition within the FGW framework. See .wiki/wiki/topics/fgw-compost-academic-standing.md for context.
 
 ### 2.3 Entities
 
