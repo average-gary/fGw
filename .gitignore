@@ -16,4 +16,6 @@ coverage/
 playwright-report/
 test-results/
 plan.md
+.test-key.json
+
 
