@@ -762,6 +762,7 @@ function recordedMethods(
   });
 }
 
+
 // ---------------------------------------------------------------------------
 // Test 16 (SPEC-050): startMembershipPoller fires an immediate fetch.
 // ---------------------------------------------------------------------------
@@ -790,15 +791,11 @@ describe('startMembershipPoller → immediate fetch on boot', () => {
 // ---------------------------------------------------------------------------
 
 describe('MembershipPoller setInterval cadence', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
   afterEach(() => {
     stopMembershipPoller();
-    vi.useRealTimers();
   });
 
-  it('refreshes every 5 minutes while the document is visible', async () => {
+  it('installs a 5-minute setInterval whose callback refreshes membership', async () => {
     await installSigner();
     const fetchSpy = emptyNip86FetchSpy();
     globalThis.fetch = fetchSpy as typeof fetch;
@@ -810,15 +807,34 @@ describe('MembershipPoller setInterval cadence', () => {
       configurable: true,
     });
 
-    startMembershipPoller();
-    // Immediate boot fetch.
-    await vi.advanceTimersByTimeAsync(0);
-    const callsAfterBoot = fetchSpy.mock.calls.length;
-    expect(callsAfterBoot).toBeGreaterThan(0);
+    // Spy on setInterval to capture the cadence + callback the poller
+    // installs. We invoke that callback directly later — simpler than
+    // juggling fake timers vs. the awaited crypto.subtle chain inside
+    // nip86Call.
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
 
-    // Advance 5 minutes — the interval should fire one refresh.
-    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
-    expect(fetchSpy.mock.calls.length).toBeGreaterThan(callsAfterBoot);
+    startMembershipPoller();
+    await waitFor(() => {
+      expect(fetchSpy.mock.calls.length).toBeGreaterThan(0);
+    });
+    const callsAfterBoot = fetchSpy.mock.calls.length;
+
+    // Find the poller's own setInterval call by its 5-minute cadence.
+    // (`waitFor` and other test infrastructure also call `setInterval`.)
+    const pollerCall = intervalSpy.mock.calls.find(
+      (c) => c[1] === 5 * 60 * 1000,
+    );
+    expect(pollerCall).toBeDefined();
+    const cb = pollerCall?.[0];
+    expect(typeof cb).toBe('function');
+
+    // Invoke the cadence callback directly to simulate the 5-minute fire.
+    (cb as () => void)();
+    await waitFor(() => {
+      expect(fetchSpy.mock.calls.length).toBeGreaterThan(callsAfterBoot);
+    });
+
+    intervalSpy.mockRestore();
   });
 });
 
@@ -927,13 +943,6 @@ describe('SPEC-050 — kind-22242 NDK subscription removed', () => {
 // ---------------------------------------------------------------------------
 
 describe('stopMembershipPoller idempotence', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it('clears the interval and is safe to call twice', async () => {
     await installSigner();
     const fetchSpy = emptyNip86FetchSpy();
@@ -944,17 +953,30 @@ describe('stopMembershipPoller idempotence', () => {
       configurable: true,
     });
 
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const clearSpy = vi.spyOn(globalThis, 'clearInterval');
+
     startMembershipPoller();
-    await vi.advanceTimersByTimeAsync(0);
-    const callsAfterBoot = fetchSpy.mock.calls.length;
-    expect(callsAfterBoot).toBeGreaterThan(0);
+    await waitFor(() => {
+      expect(fetchSpy.mock.calls.length).toBeGreaterThan(0);
+    });
+    // Find the poller's own setInterval handle by its 5-minute cadence
+    // (waitFor + other test infrastructure also call setInterval).
+    const pollerCallIdx = intervalSpy.mock.calls.findIndex(
+      (c) => c[1] === 5 * 60 * 1000,
+    );
+    expect(pollerCallIdx).toBeGreaterThan(-1);
+    const handle = intervalSpy.mock.results[pollerCallIdx]?.value;
 
     stopMembershipPoller();
-    // Calling stop twice must not throw.
+    // Calling stop twice must not throw and must not clear again.
     expect(() => stopMembershipPoller()).not.toThrow();
 
-    // No further fetches after a 5-minute window.
-    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
-    expect(fetchSpy.mock.calls.length).toBe(callsAfterBoot);
+    // The poller's interval handle was cleared exactly once.
+    const clearedHandles = clearSpy.mock.calls.map((c) => c[0]);
+    expect(clearedHandles.filter((h) => h === handle)).toHaveLength(1);
+
+    intervalSpy.mockRestore();
+    clearSpy.mockRestore();
   });
 });
