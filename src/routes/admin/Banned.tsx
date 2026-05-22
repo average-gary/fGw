@@ -4,54 +4,36 @@
  * Calls `listBanned()` on mount; restore is gated to root only and re-uses
  * `inviteByNpub` (a successful invite re-allows a banned pubkey on Pyramid).
  *
- * Root heuristic (also documented in InviteTree.tsx): the user is "root"
- * iff they're the first roster row from `listMembers()` whose `level === 0`.
- * We fetch `listMembers()` alongside `listBanned()` solely for this check.
- * TODO: ask the relay for a first-class `whoami`/`/root` endpoint.
+ * Root detection: `useIsRoot()` scrapes the signed-in user's
+ * `/u/{pubkey}` HTML page (NIP-86 list responses omit level).
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import * as nip19 from 'nostr-tools/nip19';
 import { Card, CardSubtitle, CardTitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useToast } from '@/components/ui/Toast';
 import { PubkeyChip } from '@/components/feed/PubkeyChip';
-import { useAuthStore } from '@/lib/auth';
-import { listBanned, listMembers, inviteByNpub, type Member } from '@/lib/pyramid';
+import { listBanned, inviteByNpub, useIsRoot, type Member } from '@/lib/pyramid';
 
 export interface BannedProps {
   onBack?: () => void;
 }
 
 export function Banned({ onBack }: BannedProps) {
-  const signer = useAuthStore((s) => s.signer);
-  const [myPubkey, setMyPubkey] = useState<string | null>(null);
   const [banned, setBanned] = useState<Member[]>([]);
-  const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(true);
   const [restoringPk, setRestoringPk] = useState<string | null>(null);
   const toast = useToast();
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!signer) { setMyPubkey(null); return; }
-    void signer.user().then((u) => { if (!cancelled) setMyPubkey(u.pubkey); });
-    return () => { cancelled = true; };
-  }, [signer]);
+  const isRoot = useIsRoot();
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    void Promise.all([listBanned(), listMembers()])
-      .then(([b, m]) => { if (!cancelled) { setBanned(b); setMembers(m); } })
+    void listBanned()
+      .then((b) => { if (!cancelled) setBanned(b); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, []);
-
-  const isRoot = useMemo(() => {
-    if (!myPubkey) return false;
-    const root = members.find((m) => m.level === 0);
-    return !!root && root.pubkey === myPubkey;
-  }, [members, myPubkey]);
 
   async function restore(m: Member): Promise<void> {
     let npub = m.npub;

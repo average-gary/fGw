@@ -35,7 +35,7 @@
  * pubkeys differently, parsers gracefully return empty arrays rather than
  * throw.
  */
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { create } from 'zustand';
 import { NDKEvent, type NDKSigner } from '@nostr-dev-kit/ndk';
 import * as nip19 from 'nostr-tools/nip19';
@@ -79,28 +79,50 @@ export type Result<T, E> =
   | { ok: true; value: T }
   | { ok: false; error: E };
 
+/**
+ * Page-status discriminator parsed from the `/u/{pubkey}` HTML status text.
+ * NIP-86's `listallowedpubkeys` does not surface invite-tree level, so we
+ * read it lazily from the per-member HTML page when the UI needs to know
+ * "is this user the chapter root?".
+ */
+export type MemberPageStatus =
+  | { kind: 'root'; level: 0 }
+  | { kind: 'member'; level: number }
+  | { kind: 'not-a-member' }
+  | { kind: 'unknown' };
+
 // ---------------------------------------------------------------------------
 // Zustand store
 // ---------------------------------------------------------------------------
 
 interface PyramidStore {
   statusByPubkey: Record<string, MembershipStatus>;
+  pageStatusByPubkey: Record<string, MemberPageStatus>;
   members: Member[];
   banned: Member[];
   lastFetchedAt: number;
+  /** Hex pubkey of the chapter's root admin, scraped once per chapter. */
+  rootPubkey: string | null;
   _set: (patch: Partial<PyramidStore>) => void;
   _setStatus: (pubkey: string, status: MembershipStatus) => void;
+  _setPageStatus: (pubkey: string, status: MemberPageStatus) => void;
   _appendMember: (m: Member) => void;
 }
 
 export const usePyramidStore = create<PyramidStore>((set) => ({
   statusByPubkey: {},
+  pageStatusByPubkey: {},
   members: [],
   banned: [],
   lastFetchedAt: 0,
+  rootPubkey: null,
   _set: (patch) => set(patch),
   _setStatus: (pubkey, status) =>
     set((s) => ({ statusByPubkey: { ...s.statusByPubkey, [pubkey]: status } })),
+  _setPageStatus: (pubkey, status) =>
+    set((s) => ({
+      pageStatusByPubkey: { ...s.pageStatusByPubkey, [pubkey]: status },
+    })),
   _appendMember: (m) =>
     set((s) =>
       s.members.find((x) => x.pubkey === m.pubkey)
@@ -114,9 +136,11 @@ useChapterStore.subscribe((state, prev) => {
   if (state.currentRelay === prev.currentRelay) return;
   usePyramidStore.setState({
     statusByPubkey: {},
+    pageStatusByPubkey: {},
     members: [],
     banned: [],
     lastFetchedAt: 0,
+    rootPubkey: null,
   });
 });
 
@@ -169,6 +193,26 @@ export function parseMemberPage(html: string): MemberInfo {
   out.inviters = inviterPks;
   out.invitees = inviteePks;
   return out;
+}
+
+/**
+ * Detect the per-member status from `/u/{pubkey}` HTML. Pyramid renders one
+ * of three branches: `root member` (level 0), `member at level N` / `level N`
+ * (level > 0), or `not a member`. The page is the only structured source for
+ * level since NIP-86's list responses omit it.
+ */
+export function detectMemberPageStatus(html: string): MemberPageStatus {
+  if (!html) return { kind: 'unknown' };
+  if (/not\s+a\s+member/i.test(html)) return { kind: 'not-a-member' };
+  if (/root\s+member/i.test(html)) return { kind: 'root', level: 0 };
+  const lvl = /level\s+(\d+)/i.exec(html);
+  if (lvl && lvl[1] !== undefined) {
+    const n = Number.parseInt(lvl[1], 10);
+    if (Number.isFinite(n)) {
+      return n === 0 ? { kind: 'root', level: 0 } : { kind: 'member', level: n };
+    }
+  }
+  return { kind: 'unknown' };
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +612,150 @@ export function useMembershipStatus(pubkey: string): MembershipStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Member-page status (root detection)
+//
+// NIP-86 list responses don't carry invite-tree level, so anything that
+// needs to answer "is this user the chapter root?" must scrape the
+// `/u/{pubkey}` HTML page once. Results are cached in the pyramid store
+// (per chapter, since the chapter-store subscriber wipes the cache on
+// chapter change).
+// ---------------------------------------------------------------------------
+
+const inflightPageStatus: Map<string, Promise<MemberPageStatus>> = new Map();
+
+/**
+ * Fetch and cache the per-member status from `/u/{pubkey}`. Returns
+ * `'unknown'` on transport failure rather than throwing — root-detection
+ * UI gates on `kind === 'root'` and treats anything else as "not root".
+ */
+export async function getMemberStatus(
+  pubkey: string,
+): Promise<MemberPageStatus> {
+  const pk = pubkey.toLowerCase();
+  if (!HEX64.test(pk)) return { kind: 'unknown' };
+  const cached = usePyramidStore.getState().pageStatusByPubkey[pk];
+  if (cached) return cached;
+  const inflight = inflightPageStatus.get(pk);
+  if (inflight) return inflight;
+
+  const promise = (async (): Promise<MemberPageStatus> => {
+    let status: MemberPageStatus = { kind: 'unknown' };
+    try {
+      const resp = await fetch(`${currentBase()}/u/${pk}`);
+      if (resp.ok) {
+        const html = await resp.text();
+        status = detectMemberPageStatus(html);
+      }
+    } catch {
+      /* keep 'unknown' */
+    } finally {
+      usePyramidStore.getState()._setPageStatus(pk, status);
+      inflightPageStatus.delete(pk);
+    }
+    return status;
+  })();
+  inflightPageStatus.set(pk, promise);
+  return promise;
+}
+
+/**
+ * Hook: `true` iff the signed-in user is the chapter root admin. Resolves
+ * lazily by fetching `/u/{myPubkey}` once per chapter; until the fetch
+ * settles, returns `false` (the conservative default — UI affordances
+ * gated on root stay hidden).
+ */
+export function useIsRoot(): boolean {
+  const signer = useAuthStore((s) => s.signer);
+  const [myPubkey, setMyPubkey] = useState<string | null>(null);
+  const status = usePyramidStore((s) =>
+    myPubkey ? s.pageStatusByPubkey[myPubkey] : undefined,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!signer) {
+      setMyPubkey(null);
+      return;
+    }
+    void signer.user().then((u) => {
+      if (!cancelled) setMyPubkey(u.pubkey.toLowerCase());
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [signer]);
+
+  useEffect(() => {
+    if (!myPubkey) return;
+    if (status) return;
+    void getMemberStatus(myPubkey);
+  }, [myPubkey, status]);
+
+  return status?.kind === 'root';
+}
+
+const inflightRootScrape: { promise: Promise<string | null> | null } = {
+  promise: null,
+};
+
+/**
+ * Scrape the chapter relay's `/` (invite-tree) page to discover the root
+ * admin's pubkey. Pyramid's templ output renders each member as an
+ * `<a href="/u/{npub}">` with an inner `<nostr-name pubkey="{hex}">…`,
+ * and the root row is followed by a `<span …>root</span>` badge. We
+ * prefer the hex form from `nostr-name pubkey="…"` (the href carries
+ * bech32 npubs); we also accept a literal `/u/{hex}` link in case the
+ * template ever ships hex hrefs.
+ */
+export async function getChapterRootPubkey(): Promise<string | null> {
+  const cached = usePyramidStore.getState().rootPubkey;
+  if (cached !== null) return cached;
+  if (inflightRootScrape.promise) return inflightRootScrape.promise;
+
+  inflightRootScrape.promise = (async () => {
+    let root: string | null = null;
+    try {
+      const resp = await fetch(`${currentBase()}/`);
+      if (resp.ok) {
+        const html = await resp.text();
+        // Primary: nostr-name pubkey="<hex>" near a ">root<" badge.
+        const byNostrName =
+          /nostr-name\s+pubkey="([0-9a-f]{64})"[\s\S]{0,800}?>root</i.exec(html);
+        if (byNostrName && byNostrName[1]) {
+          root = byNostrName[1].toLowerCase();
+        } else {
+          // Fallback: hex /u/ href near a ">root<" badge.
+          const byHref =
+            /\/u\/([0-9a-f]{64})[\s\S]{0,800}?>root</i.exec(html);
+          if (byHref && byHref[1]) root = byHref[1].toLowerCase();
+        }
+      }
+    } catch {
+      /* keep null */
+    } finally {
+      usePyramidStore.setState({ rootPubkey: root });
+      inflightRootScrape.promise = null;
+    }
+    return root;
+  })();
+
+  return inflightRootScrape.promise;
+}
+
+/**
+ * Hook: returns the chapter root's hex pubkey, or `null` until the scrape
+ * resolves. InviteTree uses this to seed its tree walk.
+ */
+export function useChapterRootPubkey(): string | null {
+  const root = usePyramidStore((s) => s.rootPubkey);
+  useEffect(() => {
+    if (root !== null) return;
+    void getChapterRootPubkey();
+  }, [root]);
+  return root;
+}
+
+// ---------------------------------------------------------------------------
 // usePublishGuard
 // ---------------------------------------------------------------------------
 
@@ -612,11 +800,15 @@ export function usePublishGuard(): {
 export function _resetPyramidForTests(): void {
   usePyramidStore.setState({
     statusByPubkey: {},
+    pageStatusByPubkey: {},
     members: [],
     banned: [],
     lastFetchedAt: 0,
+    rootPubkey: null,
   });
   useGuardStore.setState({ blocked: false });
   membershipPoller.stop();
   inflightRefresh = null;
+  inflightPageStatus.clear();
+  inflightRootScrape.promise = null;
 }

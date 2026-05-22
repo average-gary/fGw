@@ -14,8 +14,9 @@
  * toast on click. This is a deliberate trade-off documented at the top of
  * SPEC-026 ("show the Drop Button when current user is root, OR
  * optimistically and let the relay 403"). When the current user IS root
- * (heuristic: first roster member with `level === 0` matching their hex),
- * Drop is unconditional.
+ * (resolved via `useIsRoot()`, which scrapes the signed-in user's
+ * `/u/{pubkey}` page since NIP-86 list responses don't carry level), Drop
+ * is unconditional.
  */
 import { useEffect, useMemo, useState } from 'react';
 import { Card, CardSubtitle, CardTitle } from '@/components/ui/Card';
@@ -29,6 +30,7 @@ import {
   listMembers,
   inviteByNpub,
   dropMember,
+  useIsRoot,
   type Member,
   type InviteError,
   type DropError,
@@ -121,13 +123,9 @@ export function Members({ onBack, deepLinkInviteNpub }: MembersProps) {
     }
   }, [deepLinkInviteNpub]);
 
-  // Heuristic root: the first roster row with level === 0 whose pubkey
-  // matches the signed-in user. Documented at the top of this file.
-  const isRoot = useMemo(() => {
-    if (!myPubkey) return false;
-    const root = members.find((m) => m.level === 0);
-    return !!root && root.pubkey === myPubkey;
-  }, [members, myPubkey]);
+  // Resolved by scraping the signed-in user's `/u/{pubkey}` page (status
+  // text === "root member"). NIP-86 list responses don't carry level.
+  const isRoot = useIsRoot();
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -236,9 +234,6 @@ export function Members({ onBack, deepLinkInviteNpub }: MembersProps) {
                     <PubkeyChip pubkey={m.pubkey} />
                     <span className="font-mono text-[11px] text-soil-500 truncate">
                       {truncatedNpub}
-                      {m.level !== undefined && (
-                        <span className="ml-2 text-soil-400">L{m.level}</span>
-                      )}
                     </span>
                   </div>
                   {canDrop && (

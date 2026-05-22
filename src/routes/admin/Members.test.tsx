@@ -58,6 +58,11 @@ vi.mock('@/lib/pyramid', () => ({
       ? { ok: true, value: undefined }
       : { ok: false, error: pyramidState.dropResult.error };
   }),
+  // Members.tsx calls useIsRoot() to decide whether the row's Drop button
+  // is unconditionally visible. The existing tests don't drive root-only
+  // gating (they assert the optimistic Drop on every row), so a stable
+  // `false` is the right default.
+  useIsRoot: () => false,
 }));
 
 // PubkeyChip → dumb span (avoids NDK profile subscription).

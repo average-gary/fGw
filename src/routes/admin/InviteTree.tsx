@@ -3,12 +3,10 @@
  *
  * Renders a recursive expandable tree starting from the chapter root.
  *
- * Root heuristic (documented at SPEC-026): Pyramid does not advertise the
- * root pubkey directly via the HTTP scrape surface. We treat the **first
- * member returned by `listMembers()` whose `level === 0`** as root. If no
- * member has a level annotation we fall back to the first roster row.
- * Walking back via `/u/<pk>` `inviters` chains would give a more accurate
- * answer but burns N HTTP calls; that's a TODO.
+ * Root discovery: `useChapterRootPubkey()` scrapes the relay's `/`
+ * (invite-tree) page once and finds the first `/u/{hex}` link adjacent
+ * to a `<span ...>root</span>` badge. Cached per chapter; the cache is
+ * busted by the chapter-store subscriber on relay change.
  *
  * Per-node inviter/invitee chains are lazy-loaded on expand via
  * `parseMemberPage(html)` — `relayHttpsBase(currentRelay) + '/u/<pk>'`.
@@ -20,16 +18,15 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Card, CardSubtitle, CardTitle } from '@/components/ui/Card';
+import { Card, CardSubtitle } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { PubkeyChip } from '@/components/feed/PubkeyChip';
 import { useAuthStore } from '@/lib/auth';
 import { useChapterStore } from '@/lib/chapter';
 import {
-  listMembers,
   parseMemberPage,
   relayHttpsBase,
-  type Member,
+  useChapterRootPubkey,
   type MemberInfo,
 } from '@/lib/pyramid';
 import { cn } from '@/lib/cn';
@@ -42,8 +39,7 @@ export function InviteTree({ onBack }: InviteTreeProps) {
   const signer = useAuthStore((s) => s.signer);
   const currentRelay = useChapterStore((s) => s.currentRelay);
   const [myPubkey, setMyPubkey] = useState<string | null>(null);
-  const [roster, setRoster] = useState<Member[]>([]);
-  const [loading, setLoading] = useState(true);
+  const root = useChapterRootPubkey();
   const [infoByPk, setInfoByPk] = useState<Record<string, MemberInfo>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [fetching, setFetching] = useState<Record<string, boolean>>({});
@@ -61,27 +57,6 @@ export function InviteTree({ onBack }: InviteTreeProps) {
       cancelled = true;
     };
   }, [signer]);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    void listMembers()
-      .then((rows) => {
-        if (!cancelled) setRoster(rows);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const root: Member | null = useMemo(() => {
-    if (roster.length === 0) return null;
-    const lvl0 = roster.find((m) => m.level === 0);
-    return lvl0 ?? roster[0] ?? null;
-  }, [roster]);
 
   // Compute the path from root → current user using cached invitee chains.
   // Walks the `invitees` lists already fetched into `infoByPk`. If we
@@ -101,7 +76,7 @@ export function InviteTree({ onBack }: InviteTreeProps) {
       }
       return null;
     }
-    const path = dfs(root.pubkey, []);
+    const path = dfs(root, []);
     return new Set(path ?? []);
   }, [infoByPk, myPubkey, root]);
 
@@ -215,23 +190,16 @@ export function InviteTree({ onBack }: InviteTreeProps) {
         <span className="w-10" aria-hidden />
       </header>
 
-      {loading && (
+      {!root && (
         <Card>
           <CardSubtitle>Loading roster…</CardSubtitle>
         </Card>
       )}
 
-      {!loading && !root && (
-        <Card>
-          <CardTitle>No root found</CardTitle>
-          <CardSubtitle>The chapter roster is empty.</CardSubtitle>
-        </Card>
-      )}
-
-      {!loading && root && (
+      {root && (
         <Card bodyless>
           <ul aria-label="Invite tree" className="p-2">
-            {renderNode(root.pubkey, 0)}
+            {renderNode(root, 0)}
           </ul>
         </Card>
       )}

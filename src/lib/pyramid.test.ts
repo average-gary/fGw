@@ -89,13 +89,17 @@ import { NDKPrivateKeySigner } from '@nostr-dev-kit/ndk';
 import * as nip19 from 'nostr-tools/nip19';
 import {
   _resetPyramidForTests,
+  detectMemberPageStatus,
   dropMember,
+  getChapterRootPubkey,
+  getMemberStatus,
   inviteByNpub,
   listMembers,
   parseMemberPage,
   relayHttpsBase,
   startMembershipPoller,
   stopMembershipPoller,
+  useIsRoot,
   useMembershipStatus,
   usePublishGuard,
 } from './pyramid';
@@ -978,5 +982,179 @@ describe('stopMembershipPoller idempotence', () => {
 
     intervalSpy.mockRestore();
     clearSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 22 (Wave 10 follow-up): detectMemberPageStatus parses the four
+// branches of Pyramid's status text — root member, member at level N,
+// not a member, and unknown.
+// ---------------------------------------------------------------------------
+
+describe('detectMemberPageStatus', () => {
+  it('returns kind:"root" for "root member"', () => {
+    expect(detectMemberPageStatus('<p>root member</p>')).toEqual({
+      kind: 'root',
+      level: 0,
+    });
+  });
+  it('returns kind:"member" with level for "level N"', () => {
+    expect(detectMemberPageStatus('<p>member at level 3</p>')).toEqual({
+      kind: 'member',
+      level: 3,
+    });
+  });
+  it('returns kind:"not-a-member" for "not a member"', () => {
+    expect(detectMemberPageStatus('<p>not a member</p>')).toEqual({
+      kind: 'not-a-member',
+    });
+  });
+  it('returns kind:"unknown" when no marker is present', () => {
+    expect(detectMemberPageStatus('<p>hello</p>')).toEqual({ kind: 'unknown' });
+  });
+  it('returns kind:"unknown" for empty input', () => {
+    expect(detectMemberPageStatus('')).toEqual({ kind: 'unknown' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 23 (Wave 10 follow-up): getMemberStatus fetches /u/{pubkey}, parses
+// status text, and caches the result so a second call doesn't refetch.
+// ---------------------------------------------------------------------------
+
+describe('getMemberStatus', () => {
+  it('fetches /u/{pubkey}, parses "root member", and caches the result', async () => {
+    const fetchSpy = vi.fn(async (_url: RequestInfo | URL) =>
+      new Response('<p>root member</p>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      }),
+    );
+    globalThis.fetch = fetchSpy as typeof fetch;
+
+    const first = await getMemberStatus(PK_TARGET);
+    expect(first).toEqual({ kind: 'root', level: 0 });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toBe(
+      `https://chat.virginiafreedom.tech/u/${PK_TARGET}`,
+    );
+
+    // Second call hits the cache — no additional fetch.
+    const second = await getMemberStatus(PK_TARGET);
+    expect(second).toEqual({ kind: 'root', level: 0 });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns kind:"unknown" on transport failure', async () => {
+    globalThis.fetch = vi.fn(async () => {
+      throw new TypeError('network down');
+    }) as typeof fetch;
+    const status = await getMemberStatus(PK_A);
+    expect(status).toEqual({ kind: 'unknown' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 24 (Wave 10 follow-up): useIsRoot resolves true when the signed-in
+// user's /u/{pubkey} page reports "root member", false otherwise.
+// ---------------------------------------------------------------------------
+
+describe('useIsRoot', () => {
+  it('returns true once /u/{my-pubkey} reports "root member"', async () => {
+    const signer = NDKPrivateKeySigner.generate();
+    useAuthStore.setState({
+      method: 'nsec-local',
+      signer,
+      npub: (await signer.user()).npub,
+      status: 'ready',
+    });
+    const myHex = (await signer.user()).pubkey.toLowerCase();
+
+    globalThis.fetch = vi.fn(async (url: RequestInfo | URL) => {
+      if (String(url).endsWith(`/u/${myHex}`)) {
+        return new Response('<p>root member</p>', { status: 200 });
+      }
+      return new Response('<p>not a member</p>', { status: 200 });
+    }) as typeof fetch;
+
+    const { result } = renderHook(() => useIsRoot());
+    expect(result.current).toBe(false);
+    await waitFor(() => {
+      expect(result.current).toBe(true);
+    });
+  });
+
+  it('stays false when status is "member at level 1"', async () => {
+    const signer = NDKPrivateKeySigner.generate();
+    useAuthStore.setState({
+      method: 'nsec-local',
+      signer,
+      npub: (await signer.user()).npub,
+      status: 'ready',
+    });
+    globalThis.fetch = vi.fn(
+      async () => new Response('<p>member at level 1</p>', { status: 200 }),
+    ) as typeof fetch;
+
+    const { result } = renderHook(() => useIsRoot());
+    // Settle the lazy fetch.
+    await waitFor(() => {
+      expect(globalThis.fetch).toHaveBeenCalled();
+    });
+    // Still false — not the root.
+    expect(result.current).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 25 (Wave 10 follow-up): getChapterRootPubkey scrapes / and finds
+// the first /u/{hex} link adjacent to a "root" badge.
+// ---------------------------------------------------------------------------
+
+describe('getChapterRootPubkey', () => {
+  it('extracts the root pubkey from the invite-tree HTML', async () => {
+    const ROOT_HEX = 'd'.repeat(64);
+    const html = `
+      <ul>
+        <li>
+          <a href="/u/${ROOT_HEX}">root user</a>
+          <span class="badge">root</span>
+        </li>
+        <li><a href="/u/${PK_A}">someone else</a></li>
+      </ul>
+    `;
+    globalThis.fetch = vi.fn(
+      async () => new Response(html, { status: 200 }),
+    ) as typeof fetch;
+
+    const root = await getChapterRootPubkey();
+    expect(root).toBe(ROOT_HEX);
+  });
+
+  it('returns null when the / page lacks a root badge', async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(`<a href="/u/${PK_A}">just a member</a>`, { status: 200 }),
+    ) as typeof fetch;
+    const root = await getChapterRootPubkey();
+    expect(root).toBeNull();
+  });
+
+  it('extracts hex pubkey from nostr-name when href carries an npub', async () => {
+    // Mirrors the actual Pyramid templ shape: href is bech32, hex lives in
+    // <nostr-name pubkey="…">…</nostr-name>, and the "root" badge follows.
+    const ROOT_HEX = 'd07e1ef42535d003b31cac149cba4a47e527a55375c6e4700977271d10d976db';
+    const html = `
+      <a href="/u/npub16plpaap9xhgq8vcu4s2fewj2gljj0f2nwhrwguqfwun36yxewmdsnyr8se" class="x">
+        <nostr-name pubkey="${ROOT_HEX}">${ROOT_HEX}</nostr-name>
+      </a>
+      <span class="badge">root</span>
+    `;
+    globalThis.fetch = vi.fn(
+      async () => new Response(html, { status: 200 }),
+    ) as typeof fetch;
+
+    const root = await getChapterRootPubkey();
+    expect(root).toBe(ROOT_HEX);
   });
 });
