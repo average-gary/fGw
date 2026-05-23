@@ -1,7 +1,7 @@
 ---
 title: "Output Artifacts"
 type: layer-index
-updated: 2026-05-20
+updated: 2026-05-22
 ---
 
 # Output
@@ -14,3 +14,7 @@ Generated artifacts: assessments, reports, plans, summaries.
 | [assess-fGw-2026-05-20-r2.md](assess-fGw-2026-05-20-r2.md) | 2026-05-20 | comparison r2 (standard: 3 repo + 3 market agents; first true repo↔wiki gap analysis with populated wiki) |
 | [projects/fgw-refinements/](projects/fgw-refinements/) | 2026-05-20 | project — round-2 + round-3 wiki findings → code |
 | [projects/fgw-refinements/plan-fgw-refinements-2026-05-21.md](projects/fgw-refinements/plan-fgw-refinements-2026-05-21.md) | 2026-05-21 | spec-format plan: Wave 10 (must-fix Pyramid surgery) + Wave 11 (additive PFRP/climate/disable-enable) |
+| [projects/alpha-bundle/](projects/alpha-bundle/) | 2026-05-22 | project — ship v0.1.0-alpha.1 bundle (web + Android + desktop) |
+| [projects/alpha-bundle/plan-alpha-bundle-2026-05-22.md](projects/alpha-bundle/plan-alpha-bundle-2026-05-22.md) | 2026-05-22 | roadmap-format plan: 6-phase build-and-deploy runbook for self-hosted alpha distribution |
+| [projects/crash-reports/](projects/crash-reports/) | 2026-05-22 | project — opt-in NIP-17 crash reports |
+| [projects/crash-reports/plan-crash-reports-2026-05-22.md](projects/crash-reports/plan-crash-reports-2026-05-22.md) | 2026-05-22 | roadmap-format plan: 5-phase crash reporter using existing dm.ts pipeline; closes alpha-bundle Open Question #4 |
