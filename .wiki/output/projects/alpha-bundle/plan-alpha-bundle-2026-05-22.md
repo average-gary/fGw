@@ -43,7 +43,7 @@ Netlify) would split the trust surface — testers fetching code from
 two domains with different operators.
 
 **Options considered**:
-- **A. Same server, same TLS** — `app.virginiafreedom.tech` for the web SPA, `https://app.virginiafreedom.tech/dist/<artifact>` for installers. Single domain, single operator.
+- **A. Same server, same TLS** — `fgw.virginiafreedom.tech` for the web SPA, `https://fgw.virginiafreedom.tech/dist/<artifact>` for installers. Single domain, single operator.
 - **B. GitHub Releases for installers, GH Pages for web** — free, easy CI/CD, but couples the alpha to GitHub's availability and creates the "where does this code come from" trust question.
 - **C. Cloudflare Pages + GitHub Releases** — fastest, but two third parties.
 
@@ -52,8 +52,9 @@ already serves the relay over TLS; adding a static-asset subdomain is a
 nginx/Caddy config + DNS record, no new cost.
 
 **Consequences**:
-- One subdomain to provision (`app.virginiafreedom.tech` or
-  `fgw.virginiafreedom.tech` — pinned in Phase 1).
+- One subdomain to provision: **`fgw.virginiafreedom.tech`** (pinned
+  2026-05-22; names the project explicitly so `app.*` stays free for
+  future siblings).
 - `INSTALL.md` points to one host.
 - Outage of the chapter server == alpha goes dark. Acceptable for
   alpha audience size (~10).
@@ -163,7 +164,7 @@ as "scaffolding / pre-real-code"; `0.1.0` reads as "first alpha milestone."
 **Goal**: Lock the version, the subdomain, and confirm GitHub remote is in sync.
 
 **Tasks**:
-- [ ] Pick subdomain: `app.virginiafreedom.tech` vs `fgw.virginiafreedom.tech`. Recommend `app.` (shorter, matches "compost-marketplace app"). Pin in this plan, in `INSTALL.md`, and as the destination for `vite.config.ts` `base` if needed.
+- [x] Pick subdomain: **`fgw.virginiafreedom.tech`** (pinned 2026-05-22; names the project explicitly so `app.*` stays free for future siblings). The SPA itself is host-agnostic — `vite.config.ts`'s `base` stays at the default `/` since this is a subdomain root, not a subpath. Pin lives in nginx (Phase 2) and `INSTALL.md` (Phase 5).
 - [ ] Bump `package.json` `version` from `0.0.1` to `0.1.0`.
 - [ ] Bump `src-tauri/tauri.conf.json` `version` from `0.0.1` to `0.1.0`.
 - [ ] `pnpm install` to update `pnpm-lock.yaml` if version bumps cascade (they shouldn't, but verify).
@@ -180,16 +181,16 @@ the version-bump commit.
 
 ### Phase 2: Web build + nginx subdomain (estimated effort: 1–2 hr)
 
-**Goal**: `https://app.virginiafreedom.tech` serves the SPA pointed at
+**Goal**: `https://fgw.virginiafreedom.tech` serves the SPA pointed at
 `wss://chat.virginiafreedom.tech`.
 
 **Tasks**:
 - [ ] `pnpm vite build` produces `dist/`. Verify by serving locally with `pnpm vite preview` and walking through onboarding → invite → publish a listing.
 - [ ] On the server: provision the subdomain DNS A/AAAA record (chapter operator action).
-- [ ] On the server: nginx (or Caddy) `server` block for `app.virginiafreedom.tech` with TLS via Let's Encrypt + fallback to `index.html` for SPA hash routes (the app uses `<HashRouter>` so all routes resolve to `/index.html`).
-- [ ] On the server: `rsync dist/ root@server:/var/www/app.virginiafreedom.tech/` (or equivalent).
+- [ ] On the server: nginx (or Caddy) `server` block for `fgw.virginiafreedom.tech` with TLS via Let's Encrypt + fallback to `index.html` for SPA hash routes (the app uses `<HashRouter>` so all routes resolve to `/index.html`).
+- [ ] On the server: `rsync dist/ root@server:/var/www/fgw.virginiafreedom.tech/` (or equivalent).
 - [ ] Verify CORS / CSP — `tauri.conf.json` has `security.csp = null` (no in-app CSP); the web build's CSP comes from the nginx config. Default headers should permit `wss://chat.virginiafreedom.tech`. Test a publish from the browser; the relay's NIP-86 + NIP-42 should both work cross-origin.
-- [ ] Smoke: load `https://app.virginiafreedom.tech` on a phone browser and a desktop browser; complete onboarding with a test nsec; verify the membership poller fires (Network tab shows `POST https://chat.virginiafreedom.tech/` with `application/nostr+json+rpc`).
+- [ ] Smoke: load `https://fgw.virginiafreedom.tech` on a phone browser and a desktop browser; complete onboarding with a test nsec; verify the membership poller fires (Network tab shows `POST https://chat.virginiafreedom.tech/` with `application/nostr+json+rpc`).
 
 **Dependencies**: Phase 1.
 
@@ -212,7 +213,7 @@ on. Run on macOS for `.dmg`, on Windows for `.msi`, on Linux for
 - [ ] On Windows (via local VM, Parallels, or a separate machine): `pnpm tauri build` → `Compost Marketplace_0.1.0_x64-setup.msi`.
 - [ ] On Linux (or via WSL/VM): `pnpm tauri build` → `compost-marketplace_0.1.0_amd64.AppImage` and `compost-marketplace_0.1.0_amd64.deb`.
 - [ ] Test each: install on the host, launch, complete onboarding, publish one listing. Confirm Tauri plugins work (notification fires, stronghold reads/writes, sql cache hits).
-- [ ] `rsync` artifacts to the server: `/var/www/app.virginiafreedom.tech/downloads/`.
+- [ ] `rsync` artifacts to the server: `/var/www/fgw.virginiafreedom.tech/downloads/`.
 
 **Dependencies**: Phase 1, Phase 2 (so the web build is up — desktop
 builds default-connect to the same chapter relay, but having the web
@@ -233,7 +234,7 @@ desktop bundling — pure Tauri convention.
 ### Phase 4: Android keystore + APK (estimated effort: 1.5–2 hr)
 
 **Goal**: A signed `app-universal-release.apk` hosted at
-`https://app.virginiafreedom.tech/downloads/fgw-0.1.0-alpha.1.apk`.
+`https://fgw.virginiafreedom.tech/downloads/fgw-0.1.0-alpha.1.apk`.
 
 **Tasks**:
 - [ ] **Generate a keystore** (one-time; back this up offsite *immediately*; if lost, future Android updates cannot be published with the same package ID):
@@ -292,13 +293,13 @@ their platform of choice with no Slack-level support.
 
 **Tasks**:
 - [ ] Write `INSTALL.md` at repo root with sections:
-   1. **Web** — "open https://app.virginiafreedom.tech in a recent browser"
+   1. **Web** — "open https://fgw.virginiafreedom.tech in a recent browser"
    2. **Android** — 4-step sideload: download, enable unknown sources, install, allow notifications.
    3. **macOS** — download .dmg, drag to Applications, first-launch Gatekeeper override.
    4. **Windows** — download .msi, run, SmartScreen "More info → Run anyway."
    5. **Linux** — `chmod +x *.AppImage && ./*.AppImage`, or `dpkg -i *.deb`.
    6. **iOS** — "coming in beta when we get an Apple Developer account."
-- [ ] Optional: a tiny `index.html` landing on `app.virginiafreedom.tech/install`
+- [ ] Optional: a tiny `index.html` landing on `fgw.virginiafreedom.tech/install`
   (or `/`) with download buttons. Could also live as a single page in
   the SPA itself (`/install` route) so testers always land on something.
 - [ ] Both link to the GitHub repo
@@ -328,7 +329,7 @@ DM (or Slack message) with the install URL.
   GitHub release assets — those live on the chapter server per
   Decision 1.
 - [ ] Notify the chapter: NIP-17 DM or in-person mention to Gini and
-  the 5–10 testers, pointing them at `https://app.virginiafreedom.tech`
+  the 5–10 testers, pointing them at `https://fgw.virginiafreedom.tech`
   and the install instructions.
 - [ ] **Pre-allowlist** each tester's npub on Pyramid before they try to
   publish (per [pyramid-relay-api.md](../../../wiki/references/pyramid-relay-api.md)).
@@ -350,7 +351,7 @@ on the cookie-session vs NIP-86 invite flow.
 
 | Risk | Source | Mitigation |
 |---|---|---|
-| Web origin → relay cookie sharing breaks NIP-42 AUTH | [pyramid-relay-api.md § Auth model](../../../wiki/references/pyramid-relay-api.md) | The web SPA at `app.virginiafreedom.tech` and the relay at `chat.virginiafreedom.tech` are different subdomains. Cookies are scoped per-subdomain; AUTH cookie won't share. **However** the post-Wave-10 client uses NIP-86 (HTTP+NIP-98, not cookie session) for admin actions, and NIP-42 AUTH happens on the WebSocket — cookieless. So the cross-origin concern reduces to: does the relay accept NIP-42 AUTH from a browser whose origin isn't `chat.virginiafreedom.tech`? Per the spec it should; verify with the smoke test in Phase 2. |
+| Web origin → relay cookie sharing breaks NIP-42 AUTH | [pyramid-relay-api.md § Auth model](../../../wiki/references/pyramid-relay-api.md) | The web SPA at `fgw.virginiafreedom.tech` and the relay at `chat.virginiafreedom.tech` are different subdomains. Cookies are scoped per-subdomain; AUTH cookie won't share. **However** the post-Wave-10 client uses NIP-86 (HTTP+NIP-98, not cookie session) for admin actions, and NIP-42 AUTH happens on the WebSocket — cookieless. So the cross-origin concern reduces to: does the relay accept NIP-42 AUTH from a browser whose origin isn't `chat.virginiafreedom.tech`? Per the spec it should; verify with the smoke test in Phase 2. |
 | Android keystore lost | Stage-3 gap research | Back up `~/secrets/fgw-android.keystore` to two offsite locations (encrypted) immediately on creation. Phase 4 task list captures this. |
 | macOS / Windows install warnings drive testers off | Stage-3 gap research | `INSTALL.md` walks through the override clicks with screenshots. Audience is friendly chapter members, not strangers. |
 | 832 KB main bundle slow on cellular | [assess-r1 § Bundle code-splitting (B3)](../../assess-fGw-2026-05-20.md) | Acceptable for alpha; `INSTALL.md` notes "first load may take a few seconds." Bundle-splitting tracked as Wave-11 SPEC-058 candidate. |
