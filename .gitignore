@@ -18,4 +18,9 @@ test-results/
 plan.md
 .test-key.json
 
+# Android release-signing secrets — never commit
+# (already covered by `src-tauri/gen/` above; explicit line is defense in depth
+# in case that broad rule is ever loosened. The template lives at
+# `src-tauri/keystore.properties.template`, outside the ignored directory.)
+src-tauri/gen/android/keystore.properties
 
