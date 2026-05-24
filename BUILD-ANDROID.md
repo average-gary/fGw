@@ -146,3 +146,13 @@ Run from the repo root.
 - **Keystore is single-key today.** Multi-developer signing (e.g. one
   CI keystore + one human-developer keystore for emergency releases)
   requires a separate plan and likely Google Play's App Signing program.
+- **`pnpm tauri android init` will overwrite `src-tauri/gen/android/app/build.gradle.kts`**
+  and clobber the `keystoreProperties` + `signingConfigs.release` blocks
+  added per this doc. The whole `src-tauri/gen/` tree is gitignored (it's
+  treated as build-time scaffold), so a fresh clone has no signing
+  config until those gradle edits are reapplied. Two ways to handle it:
+  (a) keep a private patch / fork of the gradle changes and reapply
+  after `tauri android init`, or (b) avoid re-running `tauri android
+  init` once the keystore is wired (the existing `gen/android/` tree
+  already has everything the CLI would scaffold). Option (b) is the
+  recommended path until upstream Tauri ships first-class signing config.
