@@ -13,6 +13,25 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// Mock the DM transport before any code under test loads. The Phase 3
+// `sendCrashReport` function calls `sendDm`; the existing Phase 2 tests
+// don't touch DM at all, so a no-op default mock keeps them quiet while
+// the Phase 3 cases override the implementation per-test.
+vi.mock('./dm', () => {
+  class DmError extends Error {
+    kind: 'no-signer' | 'decrypt-failed';
+    constructor(kind: 'no-signer' | 'decrypt-failed', message: string) {
+      super(message);
+      this.kind = kind;
+      this.name = 'DmError';
+    }
+  }
+  return {
+    DmError,
+    sendDm: vi.fn(async () => {}),
+  };
+});
+
 const memStore = vi.hoisted(() => {
   class MemoryStorage {
     private m = new Map<string, string>();
@@ -51,12 +70,16 @@ import {
   enqueueReport,
   getQueuedReports,
   installCrashHandlers,
+  sendCrashReport,
 } from './crashReports';
 import {
   CRASH_REPORT_QUEUE_CAP,
   CRASH_REPORT_VERSION,
+  MAINTAINER_NPUB,
   type CrashReport,
 } from '@/domain/crashReports';
+import * as nip19 from 'nostr-tools/nip19';
+import { DmError, sendDm } from './dm';
 
 function makeReport(ts: number, message = 'boom'): CrashReport {
   return {
@@ -248,5 +271,65 @@ describe('crashReports — write failure is non-fatal', () => {
 
     // The slot was never written, so the queue is still empty.
     expect(getQueuedReports()).toEqual([]);
+  });
+});
+
+describe('crashReports — sendCrashReport (Phase 3)', () => {
+  const mockedSendDm = sendDm as unknown as ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    mockedSendDm.mockReset();
+    mockedSendDm.mockImplementation(async () => {});
+  });
+
+  it('returns ok and clears the report on sendDm success', async () => {
+    const report = makeReport(42, 'send-success');
+    localStorage.setItem(CRASH_REPORT_STORAGE_KEY, JSON.stringify([report]));
+
+    const result = await sendCrashReport(report);
+
+    expect(result).toEqual({ ok: true });
+    const decoded = nip19.decode(MAINTAINER_NPUB);
+    expect(decoded.type).toBe('npub');
+    expect(mockedSendDm).toHaveBeenCalledTimes(1);
+    expect(mockedSendDm).toHaveBeenCalledWith(
+      decoded.data,
+      JSON.stringify(report),
+    );
+    // Queue should be empty after a successful clear.
+    expect(getQueuedReports()).toEqual([]);
+  });
+
+  it('returns no-signer and leaves the report queued when DmError(no-signer) is thrown', async () => {
+    const report = makeReport(99, 'no-signer-case');
+    localStorage.setItem(CRASH_REPORT_STORAGE_KEY, JSON.stringify([report]));
+
+    mockedSendDm.mockImplementation(async () => {
+      throw new DmError('no-signer', 'sendDm requires an authenticated signer');
+    });
+
+    const result = await sendCrashReport(report);
+
+    expect(result).toEqual({ ok: false, reason: 'no-signer' });
+    // Report stays queued for a future retry.
+    const queue = getQueuedReports();
+    expect(queue).toHaveLength(1);
+    expect(queue[0]?.ts).toBe(99);
+  });
+
+  it('returns send-failed and leaves the report queued on a generic thrown error', async () => {
+    const report = makeReport(123, 'generic-fail');
+    localStorage.setItem(CRASH_REPORT_STORAGE_KEY, JSON.stringify([report]));
+
+    mockedSendDm.mockImplementation(async () => {
+      throw new Error('relay timeout');
+    });
+
+    const result = await sendCrashReport(report);
+
+    expect(result).toEqual({ ok: false, reason: 'send-failed' });
+    const queue = getQueuedReports();
+    expect(queue).toHaveLength(1);
+    expect(queue[0]?.ts).toBe(123);
   });
 });

@@ -14,11 +14,14 @@
  * (quota / privacy mode) drops the report rather than escalating into a
  * second crash.
  */
+import * as nip19 from 'nostr-tools/nip19';
 import {
   CRASH_REPORT_QUEUE_CAP,
+  MAINTAINER_NPUB,
   buildReport,
   type CrashReport,
 } from '@/domain/crashReports';
+import { DmError, sendDm } from './dm';
 
 /**
  * `localStorage` key under which the crash queue is persisted. Exported so
@@ -191,4 +194,53 @@ export function clearAllReports(): void {
   } catch {
     // Ignore — clearing a non-existent or unavailable slot is fine.
   }
+}
+
+/**
+ * Result of `sendCrashReport`. Discriminated union so callers can branch on
+ * `ok` and surface a specific reason for the failure modes that actually
+ * matter (no signer → "sign in first"; anything else → generic "try again
+ * later"). The function never throws; all errors land here.
+ */
+export type SendCrashReportResult =
+  | { ok: true }
+  | { ok: false; reason: 'no-signer' | 'decode-failed' | 'send-failed' };
+
+/**
+ * Ship one queued `CrashReport` to the maintainer as a NIP-17 gift-wrapped
+ * DM. On success, removes the report from the on-device queue. On
+ * `no-signer` the report stays queued so a later boot (with a signer
+ * available) can retry.
+ *
+ * Never throws — every error path resolves to `{ ok: false, reason }`.
+ *
+ * Design grounding: see plan Phase 3 + Decision 1 (real signer, not
+ * ephemeral) in
+ * `.wiki/output/projects/crash-reports/plan-crash-reports-2026-05-22.md`.
+ */
+export async function sendCrashReport(
+  report: CrashReport,
+): Promise<SendCrashReportResult> {
+  let maintainerHex: string;
+  try {
+    const decoded = nip19.decode(MAINTAINER_NPUB);
+    if (decoded.type !== 'npub' || typeof decoded.data !== 'string') {
+      return { ok: false, reason: 'decode-failed' };
+    }
+    maintainerHex = decoded.data;
+  } catch {
+    return { ok: false, reason: 'decode-failed' };
+  }
+
+  try {
+    await sendDm(maintainerHex, JSON.stringify(report));
+  } catch (err) {
+    if (err instanceof DmError && err.kind === 'no-signer') {
+      return { ok: false, reason: 'no-signer' };
+    }
+    return { ok: false, reason: 'send-failed' };
+  }
+
+  clearReport(report.ts);
+  return { ok: true };
 }

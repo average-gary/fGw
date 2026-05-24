@@ -14,7 +14,7 @@
  * lazy-loaded since it's only useful during visual debugging. Suspense
  * fallback is the standard `<Spinner/>`.
  */
-import { lazy, Suspense, useEffect, useRef, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   HashRouter,
   MemoryRouter,
@@ -28,8 +28,16 @@ import {
 import { ToastProvider } from '@/components/ui/Toast';
 import { Spinner } from '@/components/ui/Spinner';
 import { AppShell } from '@/components/AppShell';
+import { CrashBoundary } from '@/components/CrashBoundary';
+import { CrashReportPrompt } from '@/components/CrashReportPrompt';
 import { useOnboarding } from '@/lib/onboarding';
 import { startMembershipPoller, stopMembershipPoller } from '@/lib/pyramid';
+import {
+  getQueuedReports,
+  installCrashHandlers,
+} from '@/lib/crashReports';
+import { MAINTAINER_NPUB, type CrashReport } from '@/domain/crashReports';
+import { useAuthStore } from '@/lib/auth';
 import { Onboarding } from '@/routes/Onboarding';
 import { Feed } from '@/routes/Feed';
 import { Calendar } from '@/routes/Calendar';
@@ -243,60 +251,97 @@ function RequestInviteRoute(): ReactNode {
 // ---------------------------------------------------------------------------
 export function AppRoutes(): ReactNode {
   const completedAt = useOnboarding().completedAt;
-  // SPEC-050: start the Pyramid membership poller once the user has
-  // completed onboarding (no point polling before a chapter relay is
-  // configured). `startMembershipPoller` is idempotent; the cleanup stops
-  // it on unmount so tests don't leak timers across files.
+  const signer = useAuthStore((s) => s.signer);
+  const [queuedReports, setQueuedReports] = useState<CrashReport[]>([]);
+  // SPEC-050 + crash-reports Phase 4: start the Pyramid membership poller
+  // and install the global JS crash handlers once the user has completed
+  // onboarding. Both helpers are idempotent and their cleanups run on
+  // unmount so tests don't leak timers / listeners across files.
   useEffect(() => {
     if (completedAt === null) return;
     startMembershipPoller();
-    return () => stopMembershipPoller();
+    const uninstallCrashHandlers = installCrashHandlers();
+    return () => {
+      stopMembershipPoller();
+      uninstallCrashHandlers();
+    };
   }, [completedAt]);
+
+  // Read queued crash reports off localStorage as soon as both the user
+  // has finished onboarding AND a signer is available. Re-runs when the
+  // signer flips from null → set so a not-yet-signed-in user with a
+  // queued report sees the prompt only after they authenticate.
+  useEffect(() => {
+    if (completedAt === null || signer == null) {
+      setQueuedReports([]);
+      return;
+    }
+    setQueuedReports(getQueuedReports());
+  }, [completedAt, signer]);
+
   if (completedAt === null) {
     return <Onboarding />;
   }
+
+  const refreshQueue = (): void => {
+    setQueuedReports(getQueuedReports());
+  };
+
   return (
-    <Suspense
-      fallback={
-        <div className="flex min-h-dvh items-center justify-center" role="status">
-          <Spinner size="lg" />
-        </div>
-      }
-    >
-      <Routes>
-        <Route element={<AppShell />}>
-          <Route index element={<Feed />} />
-          <Route path="listings/new" element={<NewListingRoute />} />
-          <Route
-            path="listings/:authorPubkey/:dSlug"
-            element={<ListingDetailRoute />}
-          />
-          <Route path="calendar" element={<CalendarRoute />} />
-          <Route path="map" element={<MapRoute />} />
-          <Route path="piles" element={<MyPilesRoute />} />
-          <Route path="piles/new" element={<NewPileRoute />} />
-          <Route
-            path="piles/:authorPubkey/:dSlug"
-            element={<PileDetailRoute />}
-          />
-          <Route path="profile" element={<ProfileRoute />} />
-          <Route path="profile/:pubkey" element={<ProfileRoute />} />
-          <Route path="inbox" element={<InboxRoute />} />
-          <Route path="settings" element={<SettingsRoute />} />
-          <Route path="settings/chapter" element={<ChapterSwitchRoute />} />
-          <Route path="learn" element={<LearnRoute />} />
-          <Route path="admin/members" element={<MembersRoute />} />
-          <Route path="admin/tree" element={<InviteTreeRoute />} />
-          <Route path="admin/banned" element={<BannedRoute />} />
-          <Route
-            path="admin/request-invite"
-            element={<RequestInviteRoute />}
-          />
-          <Route path="_dev/components" element={<ComponentsRoute />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Route>
-      </Routes>
-    </Suspense>
+    <>
+      <CrashBoundary>
+        <Suspense
+          fallback={
+            <div className="flex min-h-dvh items-center justify-center" role="status">
+              <Spinner size="lg" />
+            </div>
+          }
+        >
+          <Routes>
+            <Route element={<AppShell />}>
+              <Route index element={<Feed />} />
+              <Route path="listings/new" element={<NewListingRoute />} />
+              <Route
+                path="listings/:authorPubkey/:dSlug"
+                element={<ListingDetailRoute />}
+              />
+              <Route path="calendar" element={<CalendarRoute />} />
+              <Route path="map" element={<MapRoute />} />
+              <Route path="piles" element={<MyPilesRoute />} />
+              <Route path="piles/new" element={<NewPileRoute />} />
+              <Route
+                path="piles/:authorPubkey/:dSlug"
+                element={<PileDetailRoute />}
+              />
+              <Route path="profile" element={<ProfileRoute />} />
+              <Route path="profile/:pubkey" element={<ProfileRoute />} />
+              <Route path="inbox" element={<InboxRoute />} />
+              <Route path="settings" element={<SettingsRoute />} />
+              <Route path="settings/chapter" element={<ChapterSwitchRoute />} />
+              <Route path="learn" element={<LearnRoute />} />
+              <Route path="admin/members" element={<MembersRoute />} />
+              <Route path="admin/tree" element={<InviteTreeRoute />} />
+              <Route path="admin/banned" element={<BannedRoute />} />
+              <Route
+                path="admin/request-invite"
+                element={<RequestInviteRoute />}
+              />
+              <Route path="_dev/components" element={<ComponentsRoute />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Route>
+          </Routes>
+        </Suspense>
+      </CrashBoundary>
+      {queuedReports.length > 0 && signer != null && (
+        <CrashReportPrompt
+          reports={queuedReports}
+          maintainerNpub={MAINTAINER_NPUB}
+          onSent={refreshQueue}
+          onDiscarded={refreshQueue}
+          onAllProcessed={refreshQueue}
+        />
+      )}
+    </>
   );
 }
 

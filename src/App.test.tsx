@@ -57,9 +57,43 @@ vi.mock('@/lib/ndk', () => {
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { AppForTest } from './App';
 import { useOnboardingStore } from '@/lib/onboarding';
+import { useAuthStore } from '@/lib/auth';
+import { CRASH_REPORT_STORAGE_KEY } from '@/lib/crashReports';
+import {
+  CRASH_REPORT_VERSION,
+  type CrashReport,
+} from '@/domain/crashReports';
+import type { NDKSigner } from '@nostr-dev-kit/ndk';
+
+function makeQueuedReport(): CrashReport {
+  return {
+    version: CRASH_REPORT_VERSION,
+    ts: 4242,
+    app_version: 'test',
+    commit_sha: 'test',
+    platform: 'test',
+    error_name: 'Error',
+    error_message: 'queued-boom',
+    stack: '',
+  };
+}
+
+/**
+ * Bare-minimum stub matching `NDKSigner`'s required surface for the
+ * AuthStore — `signer != null` is all the App.tsx prompt gate checks.
+ */
+function makeStubSigner(): NDKSigner {
+  return {
+    user: async () => ({ pubkey: 'a'.repeat(64), npub: 'npub1stub' }),
+    encrypt: async () => '',
+    decrypt: async () => '',
+    blockUntilReady: async () => ({}),
+  } as unknown as NDKSigner;
+}
 
 beforeEach(() => {
   memStore.clear();
+  useAuthStore.setState({ signer: null, status: 'idle' });
 });
 
 afterEach(() => {
@@ -112,5 +146,46 @@ describe('App router', () => {
     await waitFor(() => {
       expect(screen.getByRole('radiogroup', { name: /Kind/i })).toBeTruthy();
     });
+  });
+
+  it('renders the crash-report prompt when a report is queued AND a signer is set', async () => {
+    useOnboardingStore.setState({ completedAt: 1234567890 });
+    localStorage.setItem(
+      CRASH_REPORT_STORAGE_KEY,
+      JSON.stringify([makeQueuedReport()]),
+    );
+    useAuthStore.setState({
+      signer: makeStubSigner(),
+      status: 'ready',
+    });
+
+    render(<AppForTest initialEntries={['/']} />);
+    await waitFor(() => {
+      expect(
+        screen.getByRole('heading', { name: /Crash report ready to send/i }),
+      ).toBeTruthy();
+    });
+    // Payload preview is in the dialog.
+    expect(screen.getByLabelText('Crash report payload').textContent).toContain(
+      'queued-boom',
+    );
+  });
+
+  it('does not render the crash-report prompt when no signer is set', async () => {
+    useOnboardingStore.setState({ completedAt: 1234567890 });
+    localStorage.setItem(
+      CRASH_REPORT_STORAGE_KEY,
+      JSON.stringify([makeQueuedReport()]),
+    );
+    useAuthStore.setState({ signer: null, status: 'idle' });
+
+    render(<AppForTest initialEntries={['/']} />);
+    // Feed should mount as usual.
+    await waitFor(() => {
+      expect(screen.getByRole('radiogroup', { name: /Kind/i })).toBeTruthy();
+    });
+    expect(
+      screen.queryByRole('heading', { name: /Crash report ready to send/i }),
+    ).toBeNull();
   });
 });
