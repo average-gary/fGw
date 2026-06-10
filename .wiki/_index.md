@@ -2,7 +2,7 @@
 title: "Compost Marketplace Wiki"
 type: wiki-index
 created: 2026-05-20
-updated: 2026-05-22
+updated: 2026-06-09
 ---
 
 # Compost Marketplace Wiki
@@ -14,9 +14,9 @@ Local wiki for the **fGw** repo — the Powder Keg WV chapter's Farming God's Wa
 | Layer | Path | Purpose | Count |
 |---|---|---|---|
 | Inbox | [inbox/](inbox/) | Drop URLs, notes, screenshots here for triage | 0 |
-| Raw | [raw/](raw/) | Imported sources verbatim (articles, papers, repos, notes, data) | 21 |
-| Wiki | [wiki/](wiki/) | Synthesized articles (concepts, topics, references, theses) | 10 |
-| Output | [output/](output/) | Generated artifacts (assessments, reports, plans) | 6 |
+| Raw | [raw/](raw/) | Imported sources verbatim (articles, papers, repos, notes, data) | 37 |
+| Wiki | [wiki/](wiki/) | Synthesized articles (concepts, topics, references, theses) | 11 |
+| Output | [output/](output/) | Generated artifacts (assessments, reports, plans) | 8 |
 
 ## Subindexes
 

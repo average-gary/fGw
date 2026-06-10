@@ -1,7 +1,7 @@
 ---
 title: "Papers"
 type: layer-index
-updated: 2026-05-20
+updated: 2026-06-09
 ---
 
 # Raw Papers
@@ -10,6 +10,10 @@ Academic papers, government regulations, and primary-source manuals.
 
 | File | Source | Type | Quality |
 |---|---|---|---|
+| [2026-06-09-bitchat-whitepaper.md](2026-06-09-bitchat-whitepaper.md) | github.com/permissionlesstech/bitchat | Protocol spec (bitchat WHITEPAPER.md) | 5 |
+| [2026-06-09-bitchat-bring-the-noise.md](2026-06-09-bitchat-bring-the-noise.md) | github.com/permissionlesstech/bitchat | Protocol spec (bitchat BRING_THE_NOISE.md / Noise XX migration) | 5 |
+| [2026-06-09-breaking-bridgefy-ct-rsa-2021.md](2026-06-09-breaking-bridgefy-ct-rsa-2021.md) | IACR ePrint 2021/214 / CT-RSA 2021 | Peer-reviewed teardown (Bridgefy BLE-mesh chat) | 5 |
+| [2026-06-09-mdpi-pathloss-2.4ghz-outdoor.md](2026-06-09-mdpi-pathloss-2.4ghz-outdoor.md) | Sensors / MDPI | Peer-reviewed measurement (2.4 GHz outdoor path loss) | 5 |
 | [2026-05-20-fgw-field-guide-2nd-edition.md](2026-05-20-fgw-field-guide-2nd-edition.md) | farming-gods-way.org | Primary manual (Field Guide 2nd ed) | 5 |
 | [2026-05-20-fgw-trainers-reference-guide-2nd-edition.md](2026-05-20-fgw-trainers-reference-guide-2nd-edition.md) | farming-gods-way.org | Primary manual (Trainer's Ref Guide 2nd ed) | 4 |
 | [2026-05-20-fgw-vegetable-guide-2nd-edition.md](2026-05-20-fgw-vegetable-guide-2nd-edition.md) | farming-gods-way.org | Primary manual (Vegetable Guide 2nd ed) | 4 |

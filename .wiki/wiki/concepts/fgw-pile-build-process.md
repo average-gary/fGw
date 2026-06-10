@@ -18,7 +18,7 @@ How to construct a Farming God's Way compost pile from the ground up, per the Fi
 
 > *"Start collecting compost materials at crop canopy closure, or when there is plenty of green material around."*
 
-For Powder Keg WV (Zone 6b), this points roughly to mid-summer (canopy closure of corn / cover-crop biomass), with the build typically falling in **August–September**. The pile then turns through fall and cures over winter, ready by spring planting. See [FGW seasonal calendar — Zone 6b translation](fgw-calendar-zone-6b.md) (TODO — gap; not yet authored).
+For Powder Keg WV (Zone 6b), this points roughly to mid-summer (canopy closure of corn / cover-crop biomass), with the build typically falling in **August–September**. The pile then turns through fall and cures over winter, ready by spring planting. See [FGW calendar — Zone 6b WV translation](fgw-calendar-zone-6b-translation.md).
 
 ## Site & dimensions
 

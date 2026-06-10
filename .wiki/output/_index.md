@@ -1,7 +1,7 @@
 ---
 title: "Output Artifacts"
 type: layer-index
-updated: 2026-05-22
+updated: 2026-06-09
 ---
 
 # Output
@@ -18,3 +18,7 @@ Generated artifacts: assessments, reports, plans, summaries.
 | [projects/alpha-bundle/plan-alpha-bundle-2026-05-22.md](projects/alpha-bundle/plan-alpha-bundle-2026-05-22.md) | 2026-05-22 | roadmap-format plan: 6-phase build-and-deploy runbook for self-hosted alpha distribution |
 | [projects/crash-reports/](projects/crash-reports/) | 2026-05-22 | project — opt-in NIP-17 crash reports |
 | [projects/crash-reports/plan-crash-reports-2026-05-22.md](projects/crash-reports/plan-crash-reports-2026-05-22.md) | 2026-05-22 | roadmap-format plan: 5-phase crash reporter using existing dm.ts pipeline; closes alpha-bundle Open Question #4 |
+| [projects/fgw-full-guide/](projects/fgw-full-guide/) | 2026-06-09 | project — bundle the full FGW manual library into Learn |
+| [projects/fgw-full-guide/plan-fgw-full-guide-2026-06-09.md](projects/fgw-full-guide/plan-fgw-full-guide-2026-06-09.md) | 2026-06-09 | roadmap-format plan: 7-phase plan to ship Field Guide + Trainer's + Vegetable + Sequence Posters as long-form Learn content with extracted figures |
+| [projects/fgw-full-guide/playbook-fgw-calendar-zone-6b-translation-2026-06-09.md](projects/fgw-full-guide/playbook-fgw-calendar-zone-6b-translation-2026-06-09.md) | 2026-06-09 | research playbook: closes Phase 5 dependency on `wiki/concepts/fgw-calendar-zone-6b-translation.md`; 16 sources ingested across academic / extension / climate / practitioner / contrarian angles |
+| [projects/fgw-full-guide/plan-zone-setting-2026-06-09.md](projects/fgw-full-guide/plan-zone-setting-2026-06-09.md) | 2026-06-09 | roadmap-format plan: 6-phase plan to add a Settings → Climate Zone card with kind-0 mirroring, ZIP→zone helper, and four consumer wirings (SPEC-054 banner, Sequence Posters addendum, notification scheduler, Pile wizard) |
