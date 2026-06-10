@@ -10,6 +10,12 @@ Academic papers, government regulations, and primary-source manuals.
 
 | File | Source | Type | Quality |
 |---|---|---|---|
+| [2026-06-09-samiz-readme.md](2026-06-09-samiz-readme.md) | github.com/KoalaSat/samiz | Protocol README (samiz architecture + Negentropy + use cases) | 5 |
+| [2026-06-09-samiz-bluetoothble-source.md](2026-06-09-samiz-bluetoothble-source.md) | github.com/KoalaSat/samiz | Source code (BLE GATT UUIDs + role selection) | 5 |
+| [2026-06-09-samiz-reconciliation-source.md](2026-06-09-samiz-reconciliation-source.md) | github.com/KoalaSat/samiz | Source code (Negentropy wire format + event flow) | 5 |
+| [2026-06-09-samiz-nostrclient-source.md](2026-06-09-samiz-nostrclient-source.md) | github.com/KoalaSat/samiz | Source code (local-relay subscription + identity model) | 5 |
+| [2026-06-09-samiz-android-manifest.md](2026-06-09-samiz-android-manifest.md) | github.com/KoalaSat/samiz | Source code (AndroidManifest.xml — perms + FGS_SPECIAL_USE) | 5 |
+| [2026-06-09-nip-77-negentropy.md](2026-06-09-nip-77-negentropy.md) | github.com/nostr-protocol/nips | NIP spec (Negentropy set reconciliation) | 5 |
 | [2026-06-09-bitchat-whitepaper.md](2026-06-09-bitchat-whitepaper.md) | github.com/permissionlesstech/bitchat | Protocol spec (bitchat WHITEPAPER.md) | 5 |
 | [2026-06-09-bitchat-bring-the-noise.md](2026-06-09-bitchat-bring-the-noise.md) | github.com/permissionlesstech/bitchat | Protocol spec (bitchat BRING_THE_NOISE.md / Noise XX migration) | 5 |
 | [2026-06-09-breaking-bridgefy-ct-rsa-2021.md](2026-06-09-breaking-bridgefy-ct-rsa-2021.md) | IACR ePrint 2021/214 / CT-RSA 2021 | Peer-reviewed teardown (Bridgefy BLE-mesh chat) | 5 |

@@ -17,6 +17,12 @@ playwright-report/
 test-results/
 plan.md
 .test-key.json
+public/guides/figures/.discarded/
+
+# FGW source-manual PDFs — reproducible from .wiki/raw/papers/_pdfs-manifest.md
+# (URLs + SHA256s captured there). Markdown extracts under extracts/ are kept;
+# the binary blobs are not.
+.wiki/raw/papers/pdfs/
 
 # Android release-signing secrets — never commit
 # (already covered by `src-tauri/gen/` above; explicit line is defense in depth

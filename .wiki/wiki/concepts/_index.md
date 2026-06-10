@@ -11,6 +11,7 @@ Single-idea atomic articles.
 | Article | Confidence |
 |---|---|
 | [bitchat-integration-paths.md](bitchat-integration-paths.md) | high |
+| [samiz-integration-paths.md](samiz-integration-paths.md) | high |
 | [fgw-calendar-zone-6b-translation.md](fgw-calendar-zone-6b-translation.md) | high |
 | [fgw-pile-build-process.md](fgw-pile-build-process.md) | high |
 | [fgw-pile-turn-schedule.md](fgw-pile-turn-schedule.md) | high |
